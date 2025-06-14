@@ -1,106 +1,72 @@
 # src/backtester.py
-# VERSIONE FINALE E COMPLETA, CON STOP LOSS INTEGRATO
-import numpy as np
+# Traduzione 1:1 della logica di backtest (STEP 5) dal notebook
 import pandas as pd
 
-def run_historical_backtest(df_signals, params):
-    """
-    Esegue il backtest storico completo, inclusa la logica di stop loss,
-    e calcola le metriche di performance.
-    """
-    print("--- Avvio Backtest Storico con Logica Stop Loss Attiva ---")
+def run_backtest_from_notebook(data_df, params):
+    print("--- Esecuzione Backtest (Logica Notebook Originale) ---")
     
-    # Inizializzazione parametri
-    capitale_iniziale = params['capitale_iniziale']
-    hedge_percentage_per_tranche = params['hedge_percentage_per_tranche']
-    stop_loss_threshold_hedge = params['stop_loss_threshold_hedge']
-    micro_es_multiplier = params['micro_es_multiplier']
-    
-    # 1. Calcolo del portafoglio base (Buy and Hold)
-    df_signals['Buy_And_Hold_Equity'] = capitale_iniziale * (1 + df_signals['SPY_Close'].pct_change()).cumprod().fillna(capitale_iniziale)
+    CAPITALE_INIZIALE = params['capitale_iniziale']
+    HEDGE_PERCENTAGE_PER_TRANCHE = params['hedge_percentage_per_tranche']
+    STOP_LOSS_THRESHOLD_HEDGE = params['stop_loss_threshold_hedge']
+    MICRO_ES_MULTIPLIER = params['micro_es_multiplier']
 
-    # 2. Inizializzazione colonne per il backtest con Stop Loss
-    df_signals['Hedge_PnL'] = 0.0
-    df_signals['MES_Contracts'] = 0
-    df_signals['Stop_Loss_Triggered'] = 0
-    df_signals['Strategy_Equity'] = df_signals['Buy_And_Hold_Equity'] # Inizia uguale al B&H
+    initial_spy_price = data_df['SPY_Open'].iloc[0]
+    spy_shares = CAPITALE_INIZIALE / initial_spy_price
+    cash_from_hedging = 0.0
+    es_contracts, hedge_entry_price, current_tranches = 0, 0, 0
+    portfolio_history = [{'Date': data_df.index[0], 'Portfolio_Value': CAPITALE_INIZIALE}]
+    hedge_trades_count = 0
+    in_hedge, hedge_stopped_out = False, False
 
-    # Variabili per la gestione dello stato dello SL
-    stop_loss_active = False
-    stop_loss_level = 0
-    
-    # Ciclo di backtesting
-    for i in range(1, len(df_signals)):
-        prev_row = df_signals.iloc[i-1]
-        current_row = df_signals.iloc[i]
+    for i in range(len(data_df) - 1):
+        target_tranches = data_df['Signal_Count'].iloc[i]
+        date_T1, open_spy_T1, open_es_T1, close_spy_T1, close_es_T1 = \
+            data_df.index[i+1], data_df['SPY_Open'].iloc[i+1], data_df['ES_Open'].iloc[i+1], \
+            data_df['SPY_Close'].iloc[i+1], data_df['ES_Close'].iloc[i+1]
         
-        # Valore dell'equity della strategia alla chiusura di ieri
-        equity_yesterday = df_signals.loc[prev_row.name, 'Strategy_Equity']
+        realized_hedge_pnl_today = 0
+        
+        if current_tranches > 0:
+            if open_es_T1 > hedge_entry_price * (1 + STOP_LOSS_THRESHOLD_HEDGE):
+                realized_hedge_pnl_today = es_contracts * (open_es_T1 - hedge_entry_price) * MICRO_ES_MULTIPLIER
+                es_contracts, current_tranches, hedge_stopped_out = 0, 0, True
+            elif target_tranches < current_tranches:
+                contracts_per_tranche = es_contracts / current_tranches
+                contracts_to_close = contracts_per_tranche * (current_tranches - target_tranches)
+                realized_hedge_pnl_today = contracts_to_close * (open_es_T1 - hedge_entry_price) * MICRO_ES_MULTIPLIER
+                es_contracts -= contracts_to_close
+                current_tranches = target_tranches
 
-        # A. Controlla se lo Stop Loss è stato attivato ieri sera
-        if stop_loss_active and equity_yesterday <= stop_loss_level:
-            # Stop Loss colpito! La posizione di copertura viene chiusa all'apertura di oggi.
-            # Non si accumula P&L sulla copertura per oggi.
-            MES_contracts_in_position = 0
-            stop_loss_active = False
-            df_signals.loc[current_row.name, 'Stop_Loss_Triggered'] = 1
-        else:
-            # Nessuno stop, la posizione di ieri rimane valida per il calcolo del P&L di oggi
-            MES_contracts_in_position = prev_row['MES_Contracts']
+        if target_tranches == 0: hedge_stopped_out = False
             
-        # B. Calcola il P&L del giorno sulla posizione di copertura tenuta da ieri
-        price_change = current_row['SPY_Close'] - prev_row['SPY_Close']
-        daily_pnl = MES_contracts_in_position * micro_es_multiplier * price_change
-        df_signals.loc[current_row.name, 'Hedge_PnL'] = daily_pnl
+        if target_tranches > current_tranches and not hedge_stopped_out:
+            tranches_to_add = target_tranches - current_tranches
+            portfolio_value_at_entry = (spy_shares * open_spy_T1) + cash_from_hedging
+            notional_per_tranche = portfolio_value_at_entry * HEDGE_PERCENTAGE_PER_TRANCHE
+            if current_tranches == 0:
+                hedge_entry_price = open_es_T1
+                hedge_trades_count += 1
+            contracts_to_add = - (notional_per_tranche / (open_es_T1 * MICRO_ES_MULTIPLIER)) * tranches_to_add
+            es_contracts += contracts_to_add
+            current_tranches = target_tranches
 
-        # C. Calcola l'equity della strategia *prima* di eventuali nuovi trade
-        df_signals.loc[current_row.name, 'Strategy_Equity'] = equity_yesterday + (current_row['Buy_And_Hold_Equity'] - prev_row['Buy_And_Hold_Equity']) + daily_pnl
-
-        # D. Determina la nuova posizione di copertura per domani, basata sul segnale di oggi
-        signal_today = current_row['Signal_Count']
-        target_hedge_value = capitale_iniziale * hedge_percentage_per_tranche * signal_today
+        cash_from_hedging += realized_hedge_pnl_today
+        spy_position_value = spy_shares * close_spy_T1
+        unrealized_hedge_pnl = es_contracts * (close_es_T1 - hedge_entry_price) * MICRO_ES_MULTIPLIER if current_tranches > 0 else 0
+        portfolio_value = spy_position_value + cash_from_hedging + unrealized_hedge_pnl
+        portfolio_history.append({'Date': date_T1, 'Portfolio_Value': portfolio_value})
         
-        if current_row['SPY_Close'] > 0:
-            new_contracts_target = -round(target_hedge_value / (micro_es_multiplier * current_row['SPY_Close']))
-        else:
-            new_contracts_target = 0
-        df_signals.loc[current_row.name, 'MES_Contracts'] = new_contracts_target
-        
-        # E. Imposta un nuovo livello di Stop Loss se apriamo una posizione di copertura
-        if new_contracts_target != 0 and MES_contracts_in_position == 0:
-            # Si apre una nuova posizione di copertura
-            stop_loss_level = df_signals.loc[current_row.name, 'Strategy_Equity'] * (1 - stop_loss_threshold_hedge)
-            stop_loss_active = True
-        elif new_contracts_target == 0:
-            # La copertura è chiusa, disattiva lo SL
-            stop_loss_active = False
-
-    # 4. Calcolo Metriche di Performance (sull'equity finale e completa)
-    strategy_returns = df_signals['Strategy_Equity'].pct_change().dropna()
-    cagr = (df_signals['Strategy_Equity'].iloc[-1] / capitale_iniziale) ** (252 / len(df_signals)) - 1
-    annual_volatility = strategy_returns.std() * np.sqrt(252)
-    sharpe_ratio = cagr / annual_volatility if annual_volatility != 0 else 0
+    results_df_final = pd.DataFrame(portfolio_history).set_index('Date')
+    results_df_final['Strategy_Returns'] = results_df_final['Portfolio_Value'].pct_change()
     
-    downside_returns = strategy_returns[strategy_returns < 0]
-    sortino_volatility = downside_returns.std() * np.sqrt(252) if len(downside_returns) > 1 else 0
-    sortino_ratio = cagr / sortino_volatility if sortino_volatility != 0 else 0
+    # Calcolo benchmark B&H
+    benchmark_returns = data_df['SPY_Close'].pct_change()
+    cumulative_benchmark = (1 + benchmark_returns).cumprod() * CAPITALE_INIZIALE
+    cumulative_benchmark.iloc[0] = CAPITALE_INIZIALE
     
-    cumulative_max = df_signals['Strategy_Equity'].cummax()
-    drawdown = (df_signals['Strategy_Equity'] - cumulative_max) / cumulative_max
-    max_drawdown = drawdown.min()
-    calmar_ratio = cagr / abs(max_drawdown) if max_drawdown != 0 else 0
+    equity_curves = pd.DataFrame({
+        'Strategy_Equity': results_df_final['Portfolio_Value'],
+        'Buy_And_Hold_Equity': cumulative_benchmark
+    }).dropna()
 
-    metrics = {
-        "CAGR": f"{cagr:.2%}",
-        "Annual Volatility": f"{annual_volatility:.2%}",
-        "Sharpe Ratio": f"{sharpe_ratio:.2f}",
-        "Sortino Ratio": f"{sortino_ratio:.2f}",
-        "Max Drawdown": f"{max_drawdown:.2%}",
-        "Calmar Ratio": f"{calmar_ratio:.2f}",
-        "Numero di Stop Loss": int(df_signals['Stop_Loss_Triggered'].sum())
-    }
-
-    equity_curves = df_signals[['Strategy_Equity', 'Buy_And_Hold_Equity']]
-    
-    print("--- Backtest Storico Corretto con Stop Loss Completato ---")
-    return equity_curves, metrics
+    return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count
