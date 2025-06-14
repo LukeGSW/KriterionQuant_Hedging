@@ -151,6 +151,7 @@ def plot_backtest_trades_on_chart(df_results):
     return fig
 
 # NUOVA FUNZIONE per plottare i segnali individuali
+
 def plot_individual_signals_on_chart(df_results):
     df = df_results.copy()
     # Identifica i punti di cambio per ogni segnale
@@ -161,17 +162,29 @@ def plot_individual_signals_on_chart(df_results):
     ax.set_facecolor('#0E1117')
     ax.plot(df.index, df['SPY_Close'], label='Prezzo SPY', color='cyan', lw=1, zorder=1)
 
-    # Plot segnali CMI
-    ax.scatter(cmi_trades[cmi_trades['Signal_CMI']==1].index, cmi_trades['SPY_Close'], color='orange', marker='v', s=120, label='Entrata CMI', zorder=3, alpha=0.8)
-    ax.scatter(cmi_trades[cmi_trades['Signal_CMI']==0].index, cmi_trades['SPY_Close'], color='orange', marker='^', s=120, label='Uscita CMI', zorder=3, alpha=0.8, facecolors='none')
+    # Definisci i DataFrame per ogni tipo di segnale
+    cmi_entries = cmi_trades[cmi_trades['Signal_CMI'] == 1]
+    cmi_exits = cmi_trades[cmi_trades['Signal_CMI'] == 0]
+    vix_entries = vix_trades[vix_trades['Signal_VIX'] == 1]
+    vix_exits = vix_trades[vix_trades['Signal_VIX'] == 0]
+
+    # Plot segnali CMI (ora con filtro corretto su X e Y)
+    ax.scatter(cmi_entries.index, cmi_entries['SPY_Close'], color='orange', marker='v', s=120, label='Entrata CMI', zorder=3, alpha=0.8)
+    ax.scatter(cmi_exits.index, cmi_exits['SPY_Close'], color='orange', marker='^', s=120, label='Uscita CMI', zorder=3, alpha=0.8, facecolors='none', edgecolors='orange')
     
-    # Plot segnali VIX
-    ax.scatter(vix_trades[vix_trades['Signal_VIX']==1].index, vix_trades['SPY_Close'], color='magenta', marker='v', s=60, label='Entrata VIX', zorder=2)
-    ax.scatter(vix_trades[vix_trades['Signal_VIX']==0].index, vix_trades['SPY_Close'], color='magenta', marker='^', s=60, label='Uscita VIX', zorder=2, facecolors='none')
+    # Plot segnali VIX (ora con filtro corretto su X e Y)
+    ax.scatter(vix_entries.index, vix_entries['SPY_Close'], color='magenta', marker='v', s=60, label='Entrata VIX', zorder=2)
+    ax.scatter(vix_exits.index, vix_exits['SPY_Close'], color='magenta', marker='^', s=60, label='Uscita VIX', zorder=2, facecolors='none', edgecolors='magenta')
 
-    ax.set_title('Prezzo SPY con Segnali Individuali', color='white', fontsize=16); ax.set_ylabel('Prezzo ($)', color='white'); ax.set_yscale('log'); ax.tick_params(axis='x', colors='white'); ax.tick_params(axis='y', colors='white'); ax.legend(); plt.grid(True, which='both', linestyle='--', linewidth=0.3, color='gray'); plt.tight_layout()
+    ax.set_title('Prezzo SPY con Segnali Individuali', color='white', fontsize=16)
+    ax.set_ylabel('Prezzo ($)', color='white')
+    ax.set_yscale('log')
+    ax.tick_params(axis='x', colors='white')
+    ax.tick_params(axis='y', colors='white')
+    ax.legend()
+    plt.grid(True, which='both', linestyle='--', linewidth=0.3, color='gray')
+    plt.tight_layout()
     return fig
-
 
 # ==============================================================================
 # INTERFACCIA STREAMLIT
