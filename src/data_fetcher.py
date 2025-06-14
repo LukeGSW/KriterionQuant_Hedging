@@ -22,7 +22,7 @@ def fetch_all_data(fred_series_str, market_tickers):
             print("Dati di Mercato da Yahoo Finance scaricati.")
     except Exception as e:
         print(f"Errore critico nel download dei dati di mercato: {e}")
-        market_data = pd.DataFrame() # Restituisce un df vuoto in caso di errore
+        market_data = pd.DataFrame()
 
     # 2. Download Dati Macro
     try:
