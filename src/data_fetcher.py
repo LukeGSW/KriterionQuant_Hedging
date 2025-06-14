@@ -1,5 +1,4 @@
 # src/data_fetcher.py
-# CORREZIONE FINALE E DEFINITIVA
 import pandas as pd
 import yfinance as yf
 import pandas_datareader.data as web
@@ -21,19 +20,9 @@ def fetch_all_data(config, market_tickers, start_date_str=None):
 
     # Download Dati di Mercato
     try:
+        # NON rinominiamo più le colonne. Lasciamo la struttura originale di yfinance.
         market_data = yf.download(market_tickers, start=start_date, end=end_date, progress=False, auto_adjust=False)
-        
-        # ======================= RIGA CORRETTA =======================
-        # Rinomina le colonne nel formato TICKER_TIPO (es. SPY_Close)
-        market_data.columns = [
-            f'{col[1].replace("=", "").replace("^", "")}_{col[0]}' for col in market_data.columns
-        ]
-        # =============================================================
-
-        if market_data.empty:
-            print("ATTENZIONE: yfinance ha restituito un DataFrame vuoto.")
-        else:
-            print("Dati di Mercato da Yahoo Finance scaricati.")
+        print("Dati di Mercato da Yahoo Finance scaricati.")
     except Exception as e:
         print(f"Errore critico nel download dei dati di mercato: {e}")
         market_data = pd.DataFrame()
