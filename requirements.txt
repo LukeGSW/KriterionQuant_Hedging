@@ -1,0 +1,8 @@
+pandas
+yfinance
+pandas-datareader
+numpy
+scipy
+matplotlib
+python-telegram-bot
+configparser
