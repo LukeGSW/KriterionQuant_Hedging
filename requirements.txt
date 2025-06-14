@@ -1,6 +1,6 @@
 pandas
 yfinance
-pandas-datareader
+pandas-datareader>=0.10.0 
 numpy
 scipy
 matplotlib
