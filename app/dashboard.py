@@ -1,5 +1,5 @@
 # app/dashboard.py
-# VERSIONE FINALE E DEFINITIVA. Allineamento 1:1 con la pulizia dati del notebook.
+# VERSIONE FINALE, UNIFICATA E CORRETTA
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -10,18 +10,24 @@ from scipy.stats import zscore
 import matplotlib.pyplot as plt
 import datetime
 
-def run_full_strategy(params):
+# ==============================================================================
+# FUNZIONE UNICA CHE CONTIENE TUTTA LA STRATEGIA DAL NOTEBOOK
+# ==============================================================================
+# CORREZIONE: La funzione ora accetta correttamente i 3 parametri
+def run_full_strategy(params, start_date, end_date):
     """
     Funzione unica e auto-contenuta che esegue l'intera pipeline.
     """
-    st.info("Passo 1/4: Download di tutti i dati storici (dal 2007)...")
+    # --------------------------------------------------------------------------
+    # STEP 1: DOWNLOAD DATI
+    # --------------------------------------------------------------------------
+    st.info(f"Passo 1/4: Download di tutti i dati storici dal {start_date.strftime('%Y-%m-%d')}...")
     CAPITALE_INIZIALE = params['capitale_iniziale']
-    start_date = pd.to_datetime('2007-01-01')
-    end_date = pd.to_datetime('today').normalize()
-
+    
     all_tickers = ['SPY', 'ES=F', '^VIX', '^VIX3M']
     fred_series_cmi = {'TED_Spread': 'TEDRATE', 'Yield_Curve_10Y2Y': 'T10Y2Y', 'VIX': 'VIXCLS', 'High_Yield_Spread': 'BAMLH0A0HYM2'}
-
+    
+    # Le date ora vengono passate come argomenti, non più definite qui dentro
     market_data = yf.download(all_tickers, start=start_date, end=end_date, progress=False, auto_adjust=False)
     cmi_data_dict = {}
     try:
@@ -35,20 +41,26 @@ def run_full_strategy(params):
         st.error(f"Errore nel download dei dati da FRED: {e}")
         return None, None, None, None, None, None
 
+    # --------------------------------------------------------------------------
+    # STEP 2: PREPARAZIONE E CALCOLO SEGNALI
+    # --------------------------------------------------------------------------
     st.info("Passo 2/4: Preparazione e calcolo dei segnali...")
+    
     df = pd.DataFrame()
     for ticker in all_tickers:
         prefix = ticker.replace('=F', '').replace('^', '')
         for col_type in ['Open', 'High', 'Low', 'Close', 'Volume']:
             try:
                 df[f'{prefix}_{col_type}'] = market_data[(col_type, ticker)]
-            except KeyError: pass
-
-    df = df.join(cmi_data)
+            except KeyError:
+                pass
+    df = df.join(cmi_data).ffill()
     
-    # Calcolo CMI
+    colonne_essenziali = ['SPY_Open', 'SPY_Close', 'ES_Open', 'ES_Close', 'VIX_Close', 'VIX3M_Close']
+    df.dropna(subset=colonne_essenziali, inplace=True)
+
     cmi_cols = [col for col in fred_series_cmi.keys() if col in df.columns]
-    cmi_data_clean = df[cmi_cols] # Non usiamo dropna qui
+    cmi_data_clean = df[cmi_cols].dropna()
     
     cmi_data_zscore = cmi_data_clean.apply(zscore)
     if 'Yield_Curve_10Y2Y' in cmi_data_zscore.columns: cmi_data_zscore['Yield_Curve_10Y2Y'] *= -1
@@ -56,17 +68,12 @@ def run_full_strategy(params):
     df['CMI_ZScore'] = cmi_data_zscore.mean(axis=1)
     df['CMI_MA'] = df['CMI_ZScore'].rolling(window=int(params['cmi_ma_window'])).mean()
     
-    # ========================== LOGICA DI PULIZIA 1:1 CON IL NOTEBOOK ==========================
-    # Applichiamo il dropna() generico DOPO aver calcolato tutti gli indicatori necessari,
-    # replicando esattamente il comportamento del notebook originale.
-    df.dropna(inplace=True)
-    # ========================================================================================
+    df.dropna(subset=['CMI_MA'], inplace=True)
     
     if df.empty:
-        st.error("Il DataFrame è diventato vuoto dopo la pulizia dei dati. Questo può accadere se le fonti dati hanno troppi buchi nell'intervallo selezionato.")
+        st.error("Il DataFrame è diventato vuoto dopo la pulizia dei dati. Controllare le fonti dati.")
         return None, None, None, None, None, None
 
-    # Calcolo Segnali
     df['Signal_CMI'] = np.where(df['CMI_ZScore'] > df['CMI_MA'], 1, 0)
     df['VIX_Ratio'] = df['VIX_Close'] / df['VIX3M_Close']
     signal_vix = [0] * len(df)
@@ -79,7 +86,11 @@ def run_full_strategy(params):
     df['Signal_VIX'] = signal_vix
     df['Signal_Count'] = df['Signal_CMI'] + df['Signal_VIX']
 
+    # --------------------------------------------------------------------------
+    # STEP 3: ESECUZIONE BACKTEST
+    # --------------------------------------------------------------------------
     st.info("Passo 3/4: Esecuzione del backtest...")
+    
     initial_spy_price = df['SPY_Open'].iloc[0]
     spy_shares = CAPITALE_INIZIALE / initial_spy_price
     cash_from_hedging, es_contracts, hedge_entry_price, current_tranches = 0.0, 0, 0, 0
@@ -134,7 +145,6 @@ def run_full_strategy(params):
 
     return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count, stop_loss_events, df_con_risultati
 
-# (La funzione 'calculate_metrics' e 'plot_trades_on_chart' rimangono identiche a prima)
 def calculate_metrics(returns, total_trades, stop_loss_events, trading_days=252):
     metrics = {"Numero di Trade di Copertura": total_trades, "Numero di Stop Loss": stop_loss_events}
     cumulative_returns = (1 + returns).cumprod()
@@ -150,6 +160,7 @@ def calculate_metrics(returns, total_trades, stop_loss_events, trading_days=252)
     calmar_ratio = cagr / abs(max_drawdown) if max_drawdown != 0 else 0
     metrics.update({"Rendimento Totale": f"{total_return:.2%}", "CAGR (ann.)": f"{cagr:.2%}", "Volatilità (ann.)": f"{volatility:.2%}", "Sharpe Ratio": f"{sharpe_ratio:.2f}", "Max Drawdown": f"{max_drawdown:.2%}", "Calmar Ratio": f"{calmar_ratio:.2f}"})
     return metrics
+
 def plot_trades_on_chart(df_results):
     trade_points = df_results[df_results['MES_Contracts'].diff() != 0].copy()
     fig, ax = plt.subplots(figsize=(15, 8), facecolor='#0E1117')
@@ -190,12 +201,14 @@ params_dict['hedge_percentage_per_tranche'] = hedge_perc_input
 params_dict['stop_loss_threshold_hedge'] = stop_loss_input
 
 tab1, tab2 = st.tabs(["📊 Segnale Odierno", "📜 Backtest Storico"])
+
 with tab1:
     st.header("Visualizza il segnale di copertura per l'ultimo giorno disponibile")
     if st.button("Calcola Segnale Odierno"):
         with st.spinner("Calcolo in corso..."):
             end_date = datetime.date.today()
             start_date_recent = end_date - datetime.timedelta(days=3*365)
+            # Chiamata alla funzione con la firma corretta
             _, _, _, _, _, df_results = run_full_strategy(params_dict, start_date_recent, end_date)
             if df_results is not None and not df_results.empty:
                 latest_signal_row = df_results.iloc[-1]
@@ -204,22 +217,30 @@ with tab1:
                 col1.metric("Segnale CMI", int(latest_signal_row['Signal_CMI']))
                 col2.metric("Segnale VIX Ratio", int(latest_signal_row['Signal_VIX']))
                 col3.metric("Tranche di Copertura", int(latest_signal_row['Signal_Count']), help=f"Numero di tranche di copertura da applicare. Con i parametri attuali, corrispondono a {int(latest_signal_row['MES_Contracts'])} contratti MES.")
-            else: st.error("Impossibile calcolare il segnale odierno.")
+            else:
+                st.error("Impossibile calcolare il segnale odierno.")
+
 with tab2:
     st.header("Esegui un backtest completo sulla base dei parametri della sidebar")
     if st.button("Avvia Backtest Storico Completo"):
-        with st.spinner("Esecuzione completa della strategia in corso..."):
+        with st.spinner("Esecuzione completa della strategia in corso... (potrebbe richiedere alcuni minuti)"):
+            
             equity_curves, strategy_returns, benchmark_returns, trades, stop_losses, df_final_results = run_full_strategy(params_dict, start_date_input, datetime.date.today())
             if equity_curves is not None:
                 st.success("Esecuzione completata con successo!")
+                
                 strategy_metrics = calculate_metrics(strategy_returns, trades, stop_losses)
                 benchmark_metrics = calculate_metrics(benchmark_returns, 0, 0)
                 metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics})
+                
                 st.subheader("Grafico Operazioni di Copertura")
                 trade_chart_fig = plot_trades_on_chart(df_final_results)
                 st.pyplot(trade_chart_fig)
+                
                 st.subheader("Equity Line Storica")
                 st.line_chart(equity_curves)
+                
                 st.subheader("Metriche di Performance")
                 st.table(metrics_df)
-            else: st.error("Esecuzione del backtest fallita.")
+            else:
+                st.error("Esecuzione del backtest fallita.")
