@@ -1,5 +1,5 @@
 # app/dashboard.py
-# VERSIONE FINALE E COMPLETA con interattività e grafici avanzati
+# VERSIONE FINALE E COMPLETA con interattività, grafici avanzati e conteggio Stop Loss
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -13,7 +13,6 @@ import datetime
 # ==============================================================================
 # FUNZIONE UNICA CHE CONTIENE TUTTA LA STRATEGIA DAL NOTEBOOK
 # ==============================================================================
-# La funzione ora accetta start_date e end_date come parametri
 def run_full_strategy(params, start_date, end_date):
     """
     Funzione unica e auto-contenuta che esegue l'intera pipeline.
@@ -34,9 +33,10 @@ def run_full_strategy(params, start_date, end_date):
         cmi_data.columns = fred_series_cmi.keys()
         if 'TED_Spread' in cmi_data.columns and cmi_data['TED_Spread'].isnull().all():
             cmi_data = cmi_data.drop(columns=['TED_Spread'])
+            
     except Exception as e:
         st.error(f"Errore nel download dei dati da FRED: {e}")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     # --------------------------------------------------------------------------
     # STEP 2: PREPARAZIONE E CALCOLO SEGNALI
@@ -63,7 +63,7 @@ def run_full_strategy(params, start_date, end_date):
     df['CMI_MA'] = df['CMI_ZScore'].rolling(window=int(params['cmi_ma_window'])).mean()
     df.dropna(subset=['CMI_MA'], inplace=True)
     
-    if df.empty: return None, None, None, None, None
+    if df.empty: return None, None, None, None, None, None
 
     df['Signal_CMI'] = np.where(df['CMI_ZScore'] > df['CMI_MA'], 1, 0)
     df['VIX_Ratio'] = df['VIX_Close'] / df['VIX3M_Close']
@@ -84,7 +84,7 @@ def run_full_strategy(params, start_date, end_date):
     spy_shares = CAPITALE_INIZIALE / initial_spy_price
     cash_from_hedging, es_contracts, hedge_entry_price, current_tranches = 0.0, 0, 0, 0
     portfolio_history = [{'Date': df.index[0], 'Portfolio_Value': CAPITALE_INIZIALE, 'MES_Contracts': 0}]
-    hedge_trades_count, hedge_stopped_out = 0, False
+    hedge_trades_count, hedge_stopped_out, stop_loss_events = 0, False, 0 # Aggiunto contatore stop loss
 
     for i in range(len(df) - 1):
         target_tranches = df['Signal_Count'].iloc[i]
@@ -95,6 +95,7 @@ def run_full_strategy(params, start_date, end_date):
             if row_T1['ES_Open'] > hedge_entry_price * (1 + params['stop_loss_threshold_hedge']):
                 realized_hedge_pnl_today = es_contracts * (row_T1['ES_Open'] - hedge_entry_price) * params['micro_es_multiplier']
                 es_contracts, current_tranches, hedge_stopped_out = 0, 0, True
+                stop_loss_events += 1 # Incrementa il contatore
             elif target_tranches < current_tranches:
                 contracts_per_tranche = es_contracts / current_tranches
                 contracts_to_close = contracts_per_tranche * (current_tranches - target_tranches)
@@ -130,15 +131,16 @@ def run_full_strategy(params, start_date, end_date):
     
     equity_curves = pd.DataFrame({'Strategy_Equity': results_df['Portfolio_Value'], 'Buy_And_Hold_Equity': cumulative_benchmark}).dropna()
     
-    # Unisce i risultati del backtest (contratti) al DF principale per il grafico
-    df_con_risultati = df.join(results_df[['MES_Contracts']])
-    df_con_risultati['MES_Contracts'].ffill(inplace=True)
+    df_con_risultati = df.join(results_df[['MES_Contracts']]).ffill()
 
-    return equity_curves, results_df['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count, df_con_risultati
+    return equity_curves, results_df['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count, stop_loss_events, df_con_risultati
 
-def calculate_metrics(returns, total_trades, trading_days=252):
-    # Logica di calcolo metriche dal notebook
-    metrics = {"Numero di Trade di Copertura": total_trades}
+def calculate_metrics(returns, total_trades, stop_loss_events, trading_days=252):
+    # Logica di calcolo metriche aggiornata
+    metrics = {
+        "Numero di Trade di Copertura": total_trades,
+        "Numero di Stop Loss": stop_loss_events
+    }
     cumulative_returns = (1 + returns).cumprod()
     if cumulative_returns.empty or pd.isna(cumulative_returns.iloc[-1]): return {**metrics, **{k: "N/A" for k in ["Rendimento Totale", "CAGR (ann.)", "Volatilità (ann.)", "Sharpe Ratio", "Max Drawdown", "Calmar Ratio"]}}
     total_return = cumulative_returns.iloc[-1] - 1
@@ -154,28 +156,17 @@ def calculate_metrics(returns, total_trades, trading_days=252):
     return metrics
 
 def plot_trades_on_chart(df_results):
-    # Identifica i punti dove la posizione di copertura cambia
+    # Funzione di plotting (invariata)
     trade_points = df_results[df_results['MES_Contracts'].diff() != 0].copy()
-    
     fig, ax = plt.subplots(figsize=(15, 8), facecolor='#0E1117')
     ax.set_facecolor('#0E1117')
-
-    # Grafico del prezzo di SPY
     ax.plot(df_results.index, df_results['SPY_Close'], label='Prezzo SPY', color='cyan', lw=1, zorder=1)
-
-    # Aggiungi markers per i trade
     aumento_copertura = trade_points[trade_points['MES_Contracts'] < trade_points['MES_Contracts'].shift(1).fillna(0)]
     riduzione_copertura = trade_points[trade_points['MES_Contracts'] > trade_points['MES_Contracts'].shift(1).fillna(0)]
-    
     ax.scatter(aumento_copertura.index, aumento_copertura['SPY_Close'], color='red', marker='v', s=80, label='Aumento Copertura', zorder=2)
     ax.scatter(riduzione_copertura.index, riduzione_copertura['SPY_Close'], color='lime', marker='^', s=80, label='Riduzione Copertura', zorder=2)
-
-    # Aggiungi etichette con il numero di contratti
     for idx, row in trade_points.iterrows():
-        ax.annotate(f"{int(row['MES_Contracts'])}", (idx, row['SPY_Close']), 
-                    textcoords="offset points", xytext=(0,15), ha='center', fontsize=9,
-                    color='white', bbox=dict(boxstyle="round,pad=0.3", fc="black", ec="none", lw=0, alpha=0.7))
-    
+        ax.annotate(f"{int(row['MES_Contracts'])}", (idx, row['SPY_Close']), textcoords="offset points", xytext=(0,15), ha='center', fontsize=9, color='white', bbox=dict(boxstyle="round,pad=0.3", fc="black", ec="none", lw=0, alpha=0.7))
     ax.set_title('Prezzo SPY con Operazioni di Copertura', color='white', fontsize=16)
     ax.set_ylabel('Prezzo ($)', color='white')
     ax.set_yscale('log')
@@ -192,7 +183,6 @@ def plot_trades_on_chart(df_results):
 st.set_page_config(page_title="Kriterion Quant - Dashboard", page_icon="🔱", layout="wide")
 st.title("🔱 Dashboard Strategia di Copertura")
 
-# Carica parametri da config.ini come default
 config = configparser.ConfigParser()
 config.read('config.ini')
 default_params = dict(config['STRATEGY_PARAMS'])
@@ -200,46 +190,17 @@ for key, value in default_params.items():
     try: default_params[key] = float(value)
     except ValueError: pass
 
-# --- SIDEBAR INTERATTIVA ---
 st.sidebar.title("Parametri di Simulazione")
+start_date_input = st.sidebar.date_input("Data Inizio Backtest", value=pd.to_datetime('2007-01-01'), min_value=pd.to_datetime('2005-01-01'), max_value=datetime.date.today())
+capital_input = st.sidebar.number_input("Capitale Iniziale (€)", value=default_params['capitale_iniziale'], min_value=1000.0, step=1000.0, format="%.2f")
+hedge_perc_input = st.sidebar.slider("Hedge % per Tranche", min_value=0.1, max_value=2.0, value=default_params['hedge_percentage_per_tranche'], step=0.025, format="%.3f")
+stop_loss_input = st.sidebar.slider("Stop Loss sulla Copertura (%)", min_value=0.01, max_value=0.20, value=default_params['stop_loss_threshold_hedge'], step=0.01, format="%.2f")
 
-start_date_input = st.sidebar.date_input(
-    "Data Inizio Backtest",
-    value=pd.to_datetime('2007-01-01'),
-    min_value=pd.to_datetime('2005-01-01'),
-    max_value=datetime.date.today()
-)
-
-capital_input = st.sidebar.number_input(
-    "Capitale Iniziale (€)",
-    value=default_params['capitale_iniziale'],
-    min_value=1000.0,
-    step=1000.0,
-    format="%.2f"
-)
-
-hedge_perc_input = st.sidebar.slider(
-    "Hedge % per Tranche",
-    min_value=0.1, max_value=2.0,
-    value=default_params['hedge_percentage_per_tranche'],
-    step=0.025, format="%.3f"
-)
-
-stop_loss_input = st.sidebar.slider(
-    "Stop Loss sulla Copertura (%)",
-    min_value=0.01, max_value=0.20,
-    value=default_params['stop_loss_threshold_hedge'],
-    step=0.01, format="%.2f"
-)
-
-# Aggiorna il dizionario dei parametri con i valori della UI
 params_dict = default_params.copy()
 params_dict['capitale_iniziale'] = capital_input
 params_dict['hedge_percentage_per_tranche'] = hedge_perc_input
 params_dict['stop_loss_threshold_hedge'] = stop_loss_input
 
-
-# --- TABS PER LE DIVERSE FUNZIONALITÀ ---
 tab1, tab2 = st.tabs(["📊 Segnale Odierno", "📜 Backtest Storico"])
 
 with tab1:
@@ -247,20 +208,15 @@ with tab1:
     if st.button("Calcola Segnale Odierno"):
         with st.spinner("Calcolo in corso..."):
             end_date = datetime.date.today()
-            start_date_recent = end_date - pd.DateOffset(years=3)
-            
-            # Esegui la strategia su un periodo breve
-            _, _, _, _, df_results = run_full_strategy(params_dict, start_date_recent, end_date)
-
+            start_date_recent = end_date - datetime.timedelta(days=3*365)
+            _, _, _, _, stop_losses, df_results = run_full_strategy(params_dict, start_date_recent, end_date)
             if df_results is not None and not df_results.empty:
                 latest_signal_row = df_results.iloc[-1]
                 st.subheader(f"Segnale per il {latest_signal_row.name.strftime('%Y-%m-%d')}")
-                
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Segnale CMI", int(latest_signal_row['Signal_CMI']))
                 col2.metric("Segnale VIX Ratio", int(latest_signal_row['Signal_VIX']))
-                col3.metric("Tranche di Copertura", int(latest_signal_row['Signal_Count']), 
-                            help=f"Numero di tranche di copertura da applicare. Con i parametri attuali, corrispondono a {int(latest_signal_row['MES_Contracts'])} contratti MES.")
+                col3.metric("Tranche di Copertura", int(latest_signal_row['Signal_Count']), help=f"Numero di tranche di copertura da applicare. Con i parametri attuali, corrispondono a {int(latest_signal_row['MES_Contracts'])} contratti MES.")
             else:
                 st.error("Impossibile calcolare il segnale odierno.")
 
@@ -268,21 +224,17 @@ with tab2:
     st.header("Esegui un backtest completo sulla base dei parametri della sidebar")
     if st.button("Avvia Backtest Storico Completo"):
         with st.spinner("Esecuzione completa della strategia in corso... (potrebbe richiedere alcuni minuti)"):
-            
-            equity_curves, strategy_returns, benchmark_returns, trades, df_final_results = run_full_strategy(params_dict, start_date_input, datetime.date.today())
-
+            equity_curves, strategy_returns, benchmark_returns, trades, stop_losses, df_final_results = run_full_strategy(params_dict, start_date_input, datetime.date.today())
             if equity_curves is not None:
                 st.success("Esecuzione completata con successo!")
                 
-                # Visualizzazione Grafico Consuntivo
+                strategy_metrics = calculate_metrics(strategy_returns, trades, stop_losses)
+                benchmark_metrics = calculate_metrics(benchmark_returns, 0, 0)
+                metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics})
+                
                 st.subheader("Grafico Operazioni di Copertura")
                 trade_chart_fig = plot_trades_on_chart(df_final_results)
                 st.pyplot(trade_chart_fig)
-                
-                # Visualizzazione Equity e Metriche
-                strategy_metrics = calculate_metrics(strategy_returns, trades)
-                benchmark_metrics = calculate_metrics(benchmark_returns, 0)
-                metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics})
                 
                 st.subheader("Equity Line Storica")
                 st.line_chart(equity_curves)
