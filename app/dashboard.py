@@ -44,20 +44,27 @@ def run_full_strategy(params):
     # --------------------------------------------------------------------------
     st.info("Passo 2/4: Preparazione e calcolo dei segnali...")
     
-    # Crea un DataFrame con colonne semplici, usando il formato corretto TICKER_TIPO
+    # ========================== CORREZIONE FINALE E DEFINITIVA ==========================
+    # Crea un DataFrame con colonne semplici, usando la logica di rinomina corretta
     df = pd.DataFrame()
     for ticker in all_tickers:
-        clean_ticker = ticker.replace('=', '').replace('^', '')
+        # Gestisce i nomi speciali come 'ES=F' -> 'ES' e '^VIX' -> 'VIX'
+        prefix = ticker.replace('=F', '').replace('^', '')
         for col_type in ['Open', 'High', 'Low', 'Close', 'Volume']:
             try:
-                df[f'{clean_ticker}_{col_type}'] = market_data[(col_type, ticker)]
+                # Crea la colonna con il nome corretto, es: 'ES_Open'
+                df[f'{prefix}_{col_type}'] = market_data[(col_type, ticker)]
             except KeyError:
                 print(f"Attenzione: colonna per {ticker} - {col_type} non trovata.")
+    # =================================================================================
 
     # Unisce i dati CMI al DataFrame principale
     df = df.join(cmi_data)
     df.ffill(inplace=True)
     
+    colonne_essenziali = ['SPY_Open', 'SPY_Close', 'ES_Open', 'ES_Close', 'VIX_Close', 'VIX3M_Close']
+    df.dropna(subset=colonne_essenziali, inplace=True)
+
     # Calcolo CMI
     cmi_cols = [col for col in fred_series_cmi.keys() if col in df.columns]
     cmi_data_clean = df[cmi_cols].dropna()
@@ -69,8 +76,7 @@ def run_full_strategy(params):
     df['CMI_ZScore'] = cmi_data_zscore.mean(axis=1)
     df['CMI_MA'] = df['CMI_ZScore'].rolling(window=int(params['cmi_ma_window'])).mean()
     
-    # Dropna finale e sicuro
-    df.dropna(subset=['SPY_Close', 'CMI_MA'], inplace=True)
+    df.dropna(subset=['CMI_MA'], inplace=True)
     
     if df.empty:
         st.error("Il DataFrame è diventato vuoto dopo la pulizia dei dati. Controllare le fonti dati.")
@@ -146,7 +152,6 @@ def run_full_strategy(params):
     return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count
 
 def calculate_metrics(returns, total_trades, trading_days=252):
-    # Logica di calcolo metriche dal notebook
     metrics = {"Numero di Trade di Copertura": total_trades}
     cumulative_returns = (1 + returns).cumprod()
     if cumulative_returns.empty or pd.isna(cumulative_returns.iloc[-1]): return {**metrics, **{k: "N/A" for k in ["Rendimento Totale", "CAGR (ann.)", "Volatilità (ann.)", "Sharpe Ratio", "Max Drawdown", "Calmar Ratio"]}}
@@ -180,7 +185,7 @@ st.sidebar.json(params_dict)
 
 if st.button("Avvia Backtest (Logica 1:1 dal Notebook)"):
     with st.spinner("Esecuzione completa della strategia... (potrebbe richiedere alcuni minuti)"):
-        st.info("Passo 1/4: Inizio esecuzione...")
+        st.info("Esecuzione in corso...")
         equity_curves, strategy_returns, benchmark_returns, trades = run_full_strategy(params_dict)
 
         if equity_curves is not None:
