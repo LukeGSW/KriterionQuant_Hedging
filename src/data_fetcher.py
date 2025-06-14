@@ -1,16 +1,14 @@
 # src/data_fetcher.py
-# CORREZIONE FINALE per accettare l'oggetto config
+# CORREZIONE FINALE E DEFINITIVA
 import pandas as pd
 import yfinance as yf
 import pandas_datareader.data as web
 import datetime as dt
 import ast
 
-# La funzione ora accetta l'intero oggetto 'config'
 def fetch_all_data(config, market_tickers, start_date_str=None):
     print("--- Inizio Download Dati ---")
     
-    # Estrae la stringa dal config e la converte, come dovrebbe essere
     fred_series_str = config.get('DATA', 'fred_series_cmi')
     fred_series_cmi = ast.literal_eval(fred_series_str)
     
@@ -21,14 +19,16 @@ def fetch_all_data(config, market_tickers, start_date_str=None):
         start_date = pd.to_datetime(start_date_str)
         end_date = pd.to_datetime('today').normalize()
 
-    # Download Dati di Mercato (logica precedente invariata)
+    # Download Dati di Mercato
     try:
-        # Abbiamo rimosso il download 1-a-1 per tornare alla logica originale
-        # e per evitare problemi con la struttura delle colonne
         market_data = yf.download(market_tickers, start=start_date, end=end_date, progress=False, auto_adjust=False)
-        # Rinomina le colonne per rimuovere i tuple (es. ('Close', 'SPY') -> 'Close_SPY')
-        market_data.columns = [f'{col[0]}_{col[1].replace("=", "")}' for col in market_data.columns]
-        market_data.rename(columns=lambda x: x.replace('^', ''), inplace=True)
+        
+        # ======================= RIGA CORRETTA =======================
+        # Rinomina le colonne nel formato TICKER_TIPO (es. SPY_Close)
+        market_data.columns = [
+            f'{col[1].replace("=", "").replace("^", "")}_{col[0]}' for col in market_data.columns
+        ]
+        # =============================================================
 
         if market_data.empty:
             print("ATTENZIONE: yfinance ha restituito un DataFrame vuoto.")
@@ -38,7 +38,7 @@ def fetch_all_data(config, market_tickers, start_date_str=None):
         print(f"Errore critico nel download dei dati di mercato: {e}")
         market_data = pd.DataFrame()
 
-    # Download Dati Macro (logica precedente invariata)
+    # Download Dati Macro
     try:
         cmi_data_dict = {}
         for name, ticker in fred_series_cmi.items():
