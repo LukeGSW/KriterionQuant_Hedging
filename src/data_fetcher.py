@@ -1,4 +1,4 @@
-# src/data_fetcher.py
+# src/data_fetcher.py (Versione CORRETTA)
 import pandas as pd
 import yfinance as yf
 import pandas_datareader.data as web
@@ -11,13 +11,11 @@ def fetch_all_data(fred_series_str, market_tickers):
     """
     print("--- Inizio Download Dati ---")
     
-    # Converte la stringa del dizionario dal config in un vero dizionario
     fred_series_cmi = ast.literal_eval(fred_series_str)
 
-    # Date
     end_date = pd.to_datetime('today').normalize()
-    start_date_mkt = end_date - pd.DateOffset(years=2) # Dati sufficienti per calcoli
-    start_date_cmi = end_date - pd.DateOffset(years=3) # Dati sufficienti per z-score e medie
+    start_date_mkt = end_date - pd.DateOffset(years=2)
+    start_date_cmi = end_date - pd.DateOffset(years=3)
     
     # 1. Download Dati Macro (CMI) da FRED
     try:
@@ -26,8 +24,10 @@ def fetch_all_data(fred_series_str, market_tickers):
             cmi_data_dict[name] = web.DataReader(ticker, 'fred', start_date_cmi, end_date)
         cmi_data = pd.concat(cmi_data_dict.values(), axis=1)
         cmi_data.columns = fred_series_cmi.keys()
+        
+        # Usa ffill per riempire i buchi (es. weekend) ma NON dropna.
         cmi_data.ffill(inplace=True)
-        cmi_data.dropna(inplace=True)
+        
         print("Dati Macro (CMI) da FRED scaricati con successo.")
     except Exception as e:
         print(f"Errore nel download dei dati FRED: {e}")
@@ -40,6 +40,6 @@ def fetch_all_data(fred_series_str, market_tickers):
     except Exception as e:
         print(f"Errore nel download dei dati di mercato: {e}")
         return None, None
-        
+            
     print("--- Download Dati Completato ---\n")
     return market_data, cmi_data
