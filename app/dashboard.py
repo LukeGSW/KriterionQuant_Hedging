@@ -1,23 +1,22 @@
 # app/dashboard.py
-# VERSIONE FINALE E UNIFICATA - Tutta la logica in un unico posto
-import configparser
+# VERSIONE FINALE, UNIFICATA E ROBUSTA. TUTTA LA LOGICA È QUI.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 import pandas_datareader.data as web
 import numpy as np
-import matplotlib.pyplot as plt
+import configparser
 from scipy.stats import zscore
 
-# ==============================================================================
-# FUNZIONE UNICA CHE CONTIENE TUTTA LA STRATEGIA DAL NOTEBOOK
-# ==============================================================================
-def run_full_strategy_from_notebook(params):
-    
+def run_full_strategy(params):
+    """
+    Funzione unica e auto-contenuta che esegue l'intera pipeline:
+    Download -> Pulizia Dati Robusta -> Calcolo Segnali -> Backtest.
+    """
     # --------------------------------------------------------------------------
-    # STEP 1: PARAMETRI E DOWNLOAD DATI
+    # STEP 1: DOWNLOAD DATI
     # --------------------------------------------------------------------------
-    print("--- Inizio Esecuzione: Download Dati ---")
+    st.info("Passo 1/4: Download di tutti i dati storici (dal 2007)...")
     CAPITALE_INIZIALE = params['capitale_iniziale']
     
     all_tickers = ['SPY', 'ES=F', '^VIX', '^VIX3M']
@@ -30,75 +29,86 @@ def run_full_strategy_from_notebook(params):
     try:
         for name, ticker in fred_series_cmi.items():
             cmi_data_dict[name] = web.DataReader(ticker, 'fred', start_date, end_date)
-        cmi_data = pd.concat(cmi_data_dict.values(), axis=1, sort=False).ffill()
+        cmi_data = pd.concat(cmi_data_dict.values(), axis=1)
         cmi_data.columns = fred_series_cmi.keys()
-        # Rimuoviamo il TED Spread se la colonna è vuota, per evitare errori
         if 'TED_Spread' in cmi_data.columns and cmi_data['TED_Spread'].isnull().all():
             print("ATTENZIONE: Dati per TED_Spread non disponibili. L'indicatore viene escluso dal CMI.")
-            cmi_data.drop(columns=['TED_Spread'], inplace=True)
-            
+            cmi_data = cmi_data.drop(columns=['TED_Spread'])
     except Exception as e:
-        st.error(f"Errore nel download dei dati da FRED: {e}")
+        st.error(f"Errore critico nel download dei dati da FRED: {e}")
         return None, None, None, None
 
     # --------------------------------------------------------------------------
-    # STEP 2: CALCOLO SEGNALI
+    # STEP 2: PREPARAZIONE E PULIZIA DATI (Logica Robusta)
     # --------------------------------------------------------------------------
-    print("--- Calcolo Segnali ---")
-    data_df = pd.DataFrame({
-        'SPY_Close': market_data[('Close', 'SPY')], 'SPY_Open': market_data[('Open', 'SPY')],
-        'ES_Close': market_data[('Close', 'ES=F')], 'ES_Open': market_data[('Open', 'ES=F')],
-        'VIX_Close': market_data[('Close', '^VIX')], 'VIX3M_Close': market_data[('Close', '^VIX3M')]
-    })
+    st.info("Passo 2/4: Preparazione e allineamento dei dati...")
+    
+    # Prepara il DataFrame di mercato con colonne semplici
+    df = market_data.copy()
+    df.columns = ['_'.join(col) for col in df.columns]
+    df.rename(columns=lambda x: x.replace('=', '').replace('^', ''), inplace=True)
+    
+    # Unisce i dati CMI al DataFrame principale
+    df = df.join(cmi_data)
+    
+    # Propaga in avanti TUTTI i dati per riempire i buchi (weekend, festivi)
+    df.ffill(inplace=True)
+    
+    # Pulisce il DataFrame SOLO in base all'asset primario (SPY) e ai dati VIX
+    # Questa è la modifica chiave che impedisce al DataFrame di svuotarsi
+    colonne_essenziali = ['SPY_Open', 'SPY_Close', 'ES_Open', 'ES_Close', 'VIX_Close', 'VIX3M_Close']
+    df.dropna(subset=colonne_essenziali, inplace=True)
 
-    cmi_data_zscore = cmi_data.apply(zscore).dropna()
+    # --------------------------------------------------------------------------
+    # STEP 3: CALCOLO SEGNALI (sui dati puliti)
+    # --------------------------------------------------------------------------
+    st.info("Passo 3/4: Calcolo dei segnali sulla base dati allineata...")
+    
+    cmi_cols = [col for col in fred_series_cmi.keys() if col in df.columns]
+    cmi_data_clean = df[cmi_cols]
+    
+    cmi_data_zscore = cmi_data_clean.apply(zscore)
     if 'Yield_Curve_10Y2Y' in cmi_data_zscore.columns:
-        cmi_data_zscore['Yield_Curve_10Y2Y'] = cmi_data_zscore['Yield_Curve_10Y2Y'] * -1
+        cmi_data_zscore['Yield_Curve_10Y2Y'] *= -1
         
-    composite_index_zscore = cmi_data_zscore.mean(axis=1)
-    cmi_ma = composite_index_zscore.rolling(window=int(params['cmi_ma_window'])).mean()
-
-    data_df['CMI_ZScore'] = composite_index_zscore
-    data_df['CMI_MA'] = cmi_ma
+    df['CMI_ZScore'] = cmi_data_zscore.mean(axis=1)
+    df['CMI_MA'] = df['CMI_ZScore'].rolling(window=int(params['cmi_ma_window'])).mean()
     
-    # Dropna robusto, solo sulle colonne necessarie per i segnali
-    data_df.dropna(subset=['SPY_Open', 'SPY_Close', 'ES_Open', 'ES_Close', 'VIX_Close', 'VIX3M_Close', 'CMI_MA'], inplace=True)
+    # Ora il dropna finale è sicuro perché basato su un singolo calcolo
+    df.dropna(subset=['CMI_MA'], inplace=True)
     
-    if data_df.empty:
-        st.error("Il DataFrame è diventato vuoto dopo la pulizia dei dati. Impossibile continuare.")
-        return None, None, None, None
-
-    data_df['Signal_CMI'] = np.where(data_df['CMI_ZScore'] > data_df['CMI_MA'], 1, 0)
+    df['Signal_CMI'] = np.where(df['CMI_ZScore'] > df['CMI_MA'], 1, 0)
     
-    data_df['VIX_Ratio'] = data_df['VIX_Close'] / data_df['VIX3M_Close']
-    signal_vix = [0] * len(data_df)
+    df['VIX_Ratio'] = df['VIX_Close'] / df['VIX3M_Close']
+    signal_vix = [0] * len(df)
     in_hedge_signal = False
-    for i in range(len(data_df)):
-        ratio = data_df['VIX_Ratio'].iloc[i]
+    for i in range(len(df)):
+        ratio = df['VIX_Ratio'].iloc[i]
         if ratio > params['vix_ratio_upper_threshold']: in_hedge_signal = True
         elif ratio < params['vix_ratio_lower_threshold']: in_hedge_signal = False
         if in_hedge_signal: signal_vix[i] = 1
-    data_df['Signal_VIX'] = signal_vix
-    data_df['Signal_Count'] = data_df['Signal_CMI'] + data_df['Signal_VIX']
+    df['Signal_VIX'] = signal_vix
+    df['Signal_Count'] = df['Signal_CMI'] + df['Signal_VIX']
 
     # --------------------------------------------------------------------------
-    # STEP 3: ESECUZIONE BACKTEST
+    # STEP 4: ESECUZIONE BACKTEST (Logica 1:1 dal Notebook)
     # --------------------------------------------------------------------------
-    print("--- Esecuzione Backtest ---")
-    # Questa è la logica 1:1 del tuo notebook
-    initial_spy_price = data_df['SPY_Open'].iloc[0]
+    st.info("Passo 4/4: Esecuzione del backtest sulla base dei segnali...")
+    
+    initial_spy_price = df['SPY_Open'].iloc[0]
     spy_shares = CAPITALE_INIZIALE / initial_spy_price
     cash_from_hedging = 0.0
     es_contracts, hedge_entry_price, current_tranches = 0, 0, 0
-    portfolio_history = [{'Date': data_df.index[0], 'Portfolio_Value': CAPITALE_INIZIALE}]
+    portfolio_history = [{'Date': df.index[0], 'Portfolio_Value': CAPITALE_INIZIALE}]
     hedge_trades_count = 0
     hedge_stopped_out = False
 
-    for i in range(len(data_df) - 1):
-        target_tranches = data_df['Signal_Count'].iloc[i]
+    for i in range(len(df) - 1):
+        # La logica del loop è una copia esatta di quella fornita
+        target_tranches = df['Signal_Count'].iloc[i]
         date_T1, open_spy_T1, open_es_T1, close_spy_T1, close_es_T1 = \
-            data_df.index[i+1], data_df['SPY_Open'].iloc[i+1], data_df['ES_Open'].iloc[i+1], \
-            data_df['SPY_Close'].iloc[i+1], data_df['ES_Close'].iloc[i+1]
+            df.index[i+1], df['SPY_Open'].iloc[i+1], df['ES_Open'].iloc[i+1], \
+            df['SPY_Close'].iloc[i+1], df['ES_Close'].iloc[i+1]
         
         realized_hedge_pnl_today = 0
         
@@ -135,7 +145,7 @@ def run_full_strategy_from_notebook(params):
     results_df_final = pd.DataFrame(portfolio_history).set_index('Date')
     results_df_final['Strategy_Returns'] = results_df_final['Portfolio_Value'].pct_change()
     
-    benchmark_returns = data_df['SPY_Close'].pct_change()
+    benchmark_returns = df['SPY_Close'].pct_change()
     cumulative_benchmark = (1 + benchmark_returns).cumprod() * CAPITALE_INIZIALE
     cumulative_benchmark.iloc[0] = CAPITALE_INIZIALE
     
@@ -146,10 +156,8 @@ def run_full_strategy_from_notebook(params):
 
     return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count
 
-# ------------------------------------------------------------------------------
-# FUNZIONE PER LE METRICHE (DAL NOTEBOOK)
-# ------------------------------------------------------------------------------
-def calculate_metrics_from_notebook(returns, total_trades, trading_days=252):
+def calculate_metrics(returns, total_trades, trading_days=252):
+    # Logica di calcolo metriche dal notebook
     metrics = {"Numero di Trade di Copertura": total_trades}
     cumulative_returns = (1 + returns).cumprod()
     if cumulative_returns.empty or pd.isna(cumulative_returns.iloc[-1]): return {**metrics, **{k: "N/A" for k in ["Rendimento Totale", "CAGR (ann.)", "Volatilità (ann.)", "Sharpe Ratio", "Max Drawdown", "Calmar Ratio"]}}
@@ -186,11 +194,11 @@ st.sidebar.json(params_dict)
 
 if st.button("Avvia Backtest (Logica 1:1 dal Notebook)"):
     with st.spinner("Esecuzione completa della strategia... (potrebbe richiedere alcuni minuti)"):
-        equity_curves, strategy_returns, benchmark_returns, trades = run_full_strategy_from_notebook(params_dict)
+        equity_curves, strategy_returns, benchmark_returns, trades = run_full_strategy(params_dict)
 
         if equity_curves is not None:
-            strategy_metrics = calculate_metrics_from_notebook(strategy_returns, trades)
-            benchmark_metrics = calculate_metrics_from_notebook(benchmark_returns, 0)
+            strategy_metrics = calculate_metrics(strategy_returns, trades)
+            benchmark_metrics = calculate_metrics(benchmark_returns, 0)
             metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics})
             
             st.subheader("Equity Line Storica")
@@ -198,4 +206,4 @@ if st.button("Avvia Backtest (Logica 1:1 dal Notebook)"):
             st.subheader("Metriche di Performance")
             st.table(metrics_df)
         else:
-            st.error("Esecuzione fallita. Controllare i log.")
+            st.error("Esecuzione fallita. La funzione di strategia non ha restituito risultati.")
