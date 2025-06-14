@@ -1,5 +1,5 @@
 # app/dashboard.py
-# VERSIONE FINALE E COMPLETA con tutte le funzionalità richieste
+# VERSIONE FINALE E DEFINITIVA. Corregge il calcolo del Max Drawdown Coperture.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -14,7 +14,6 @@ import datetime
 # FUNZIONE UNICA CHE CONTIENE TUTTA LA STRATEGIA DAL NOTEBOOK
 # ==============================================================================
 def run_full_strategy(params, start_date, end_date):
-    st.info(f"Passo 1/3: Download di tutti i dati storici dal {start_date.strftime('%Y-%m-%d')}...")
     CAPITALE_INIZIALE = params['capitale_iniziale']
     all_tickers = ['SPY', 'ES=F', '^VIX', '^VIX3M']
     fred_series_cmi = {'TED_Spread': 'TEDRATE', 'Yield_Curve_10Y2Y': 'T10Y2Y', 'VIX': 'VIXCLS', 'High_Yield_Spread': 'BAMLH0A0HYM2'}
@@ -29,7 +28,6 @@ def run_full_strategy(params, start_date, end_date):
     except Exception as e:
         st.error(f"Errore nel download dei dati da FRED: {e}"); return None, None, None, None, None, None, None
 
-    st.info("Passo 2/3: Preparazione e calcolo dei segnali...")
     df = pd.DataFrame()
     for ticker in all_tickers:
         prefix = ticker.replace('=F', '').replace('^', '')
@@ -64,10 +62,10 @@ def run_full_strategy(params, start_date, end_date):
     df['Signal_VIX'] = signal_vix
     df['Signal_Count'] = df['Signal_CMI'] + df['Signal_VIX']
 
-    st.info("Passo 3/3: Esecuzione del backtest...")
     initial_spy_price = df['SPY_Open'].iloc[0]
     spy_shares = CAPITALE_INIZIALE / initial_spy_price
     cash_from_hedging, es_contracts, hedge_entry_price, current_tranches = 0.0, 0, 0, 0
+    # Aggiunto Hedge_PnL alla history per il calcolo del drawdown
     portfolio_history = [{'Date': df.index[0], 'Portfolio_Value': CAPITALE_INIZIALE, 'MES_Contracts': 0, 'Hedge_PnL': 0.0}]
     hedge_trades_count, hedge_stopped_out, stop_loss_events = 0, False, 0
 
@@ -76,6 +74,12 @@ def run_full_strategy(params, start_date, end_date):
         row_T1 = df.iloc[i+1]
         
         realized_hedge_pnl_today = 0
+        unrealized_pnl_change = 0
+        
+        # Calcola il P&L non realizzato della posizione del giorno prima
+        if current_tranches > 0:
+            unrealized_pnl_change = es_contracts * (row_T1['ES_Close'] - df.iloc[i]['ES_Close']) * params['micro_es_multiplier']
+        
         if current_tranches > 0:
             if row_T1['ES_Open'] > hedge_entry_price * (1 + params['stop_loss_threshold_hedge']):
                 realized_hedge_pnl_today = es_contracts * (row_T1['ES_Open'] - hedge_entry_price) * params['micro_es_multiplier']
@@ -104,15 +108,16 @@ def run_full_strategy(params, start_date, end_date):
         spy_position_value = spy_shares * row_T1['SPY_Close']
         unrealized_hedge_pnl = es_contracts * (row_T1['ES_Close'] - hedge_entry_price) * params['micro_es_multiplier'] if current_tranches > 0 else 0
         portfolio_value = spy_position_value + cash_from_hedging + unrealized_hedge_pnl
-        # Calcolo P&L della sola copertura
-        daily_hedge_pnl = realized_hedge_pnl_today + (es_contracts * (row_T1['ES_Close'] - (df.iloc[i]['ES_Close'])) * params['micro_es_multiplier'] if current_tranches > 0 else 0)
+        
+        # Il P&L giornaliero della copertura è la somma di realizzato e variazione del non realizzato
+        daily_hedge_pnl = realized_hedge_pnl_today + unrealized_pnl_change
 
         portfolio_history.append({'Date': row_T1.name, 'Portfolio_Value': portfolio_value, 'MES_Contracts': es_contracts, 'Hedge_PnL': daily_hedge_pnl})
         
     results_df_final = pd.DataFrame(portfolio_history).set_index('Date')
     results_df_final['Strategy_Returns'] = results_df_final['Portfolio_Value'].pct_change()
     
-    # Calcolo Max Drawdown delle sole coperture
+    # Calcolo Max Drawdown delle sole coperture (in termini monetari)
     cumulative_hedge_pnl = results_df_final['Hedge_PnL'].cumsum()
     running_max_pnl = cumulative_hedge_pnl.cummax()
     hedge_drawdown = cumulative_hedge_pnl - running_max_pnl
@@ -127,13 +132,12 @@ def run_full_strategy(params, start_date, end_date):
 
     return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count, stop_loss_events, max_drawdown_hedge_value, df_con_risultati
 
-def calculate_metrics(returns, total_trades, stop_loss_events, max_drawdown_hedge, capitale_iniziale, trading_days=252):
-    # Logica di calcolo metriche aggiornata per includere il nuovo valore
-    max_drawdown_hedge_pct = (max_drawdown_hedge / capitale_iniziale) if capitale_iniziale > 0 else 0
+def calculate_metrics(returns, total_trades, stop_loss_events, max_drawdown_hedge, trading_days=252):
+    # Logica di calcolo metriche aggiornata per mostrare il valore monetario
     metrics = {
         "Numero di Trade di Copertura": total_trades,
         "Numero di Stop Loss": stop_loss_events,
-        "Max Drawdown Coperture": f"{max_drawdown_hedge_pct:.2%}" # Nuova metrica
+        "Max Drawdown Coperture (€)": f"{max_drawdown_hedge:,.2f}" # CORRETTO: Mostra valore monetario
     }
     cumulative_returns = (1 + returns).cumprod()
     if cumulative_returns.empty or pd.isna(cumulative_returns.iloc[-1]): return {**metrics, **{k: "N/A" for k in ["Rendimento Totale", "CAGR (ann.)", "Volatilità (ann.)", "Sharpe Ratio", "Max Drawdown", "Calmar Ratio"]}}
@@ -146,12 +150,10 @@ def calculate_metrics(returns, total_trades, stop_loss_events, max_drawdown_hedg
     return metrics
 
 def plotly_trades_chart(df_results, title):
-    # Funzione di plotting interattiva con Plotly
-    trade_points = df_results[df_results['MES_Contracts'].diff() != 0].copy()
-    fig = go.Figure()
+    # ... (invariata)
+    trade_points = df_results[df_results['MES_Contracts'].diff() != 0].copy(); fig = go.Figure()
     fig.add_trace(go.Scatter(x=df_results.index, y=df_results['SPY_Close'], mode='lines', name='Prezzo SPY', line=dict(color='cyan', width=1)))
-    aumento_copertura = trade_points[trade_points['MES_Contracts'] < trade_points['MES_Contracts'].shift(1).fillna(0)]
-    riduzione_copertura = trade_points[trade_points['MES_Contracts'] > trade_points['MES_Contracts'].shift(1).fillna(0)]
+    aumento_copertura = trade_points[trade_points['MES_Contracts'] < trade_points['MES_Contracts'].shift(1).fillna(0)]; riduzione_copertura = trade_points[trade_points['MES_Contracts'] > trade_points['MES_Contracts'].shift(1).fillna(0)]
     fig.add_trace(go.Scatter(x=aumento_copertura.index, y=aumento_copertura['SPY_Close'], mode='markers', name='Aumento Copertura', marker=dict(color='red', symbol='triangle-down', size=10)))
     fig.add_trace(go.Scatter(x=riduzione_copertura.index, y=riduzione_copertura['SPY_Close'], mode='markers', name='Riduzione Copertura', marker=dict(color='lime', symbol='triangle-up', size=10)))
     for _, row in trade_points.iterrows():
@@ -160,6 +162,7 @@ def plotly_trades_chart(df_results, title):
     return fig
 
 def plotly_individual_signals_chart(df_results):
+    # ... (invariata)
     df = df_results.copy(); cmi_trades = df[df['Signal_CMI'].diff() != 0]; vix_trades = df[df['Signal_VIX'].diff() != 0]
     fig = go.Figure(); fig.add_trace(go.Scatter(x=df.index, y=df['SPY_Close'], mode='lines', name='Prezzo SPY', line=dict(color='cyan', width=1)))
     cmi_entries = cmi_trades[cmi_trades['Signal_CMI'] == 1]; cmi_exits = cmi_trades[cmi_trades['Signal_CMI'] == 0]
@@ -202,7 +205,7 @@ with tab1:
             start_date_recent = end_date - datetime.timedelta(days=2*365)
             results = run_full_strategy(params_dict, start_date_recent, end_date)
             if results is not None:
-                _, _, _, _, _, df_results = results
+                _, _, _, _, _, _, df_results = results
                 if not df_results.empty:
                     df_last_year = df_results.last('365D')
                     latest_signal_row = df_results.iloc[-1]
@@ -227,8 +230,8 @@ with tab2:
                 equity_curves, strategy_returns, benchmark_returns, trades, stop_losses, max_drawdown_hedge, df_final_results = results
                 st.success("Esecuzione completata con successo!")
                 
-                strategy_metrics = calculate_metrics(strategy_returns, trades, stop_losses, max_drawdown_hedge, params_dict['capitale_iniziale'])
-                benchmark_metrics = calculate_metrics(benchmark_returns, 0, 0, 0, params_dict['capitale_iniziale'])
+                strategy_metrics = calculate_metrics(strategy_returns, trades, stop_losses, max_drawdown_hedge)
+                benchmark_metrics = calculate_metrics(benchmark_returns, 0, 0, 0)
                 metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics})
                 
                 st.subheader("Grafico Operazioni di Copertura"); st.plotly_chart(plotly_trades_chart(df_final_results, 'Prezzo SPY con Operazioni di Copertura (Backtest)'), use_container_width=True)
