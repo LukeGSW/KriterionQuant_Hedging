@@ -1,5 +1,4 @@
 # app/dashboard.py
-# VERSIONE FINALE DI DEBUG: Analizza le fonti dati
 import streamlit as st
 import pandas as pd
 import configparser
@@ -8,14 +7,16 @@ import os
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from src.data_fetcher import fetch_all_data
-# Non importiamo più calculate_signals qui per ora, per isolare il problema
+from src.indicator_calculator import calculate_signals
 
-st.set_page_config(page_title="Kriterion Quant - Analisi Fonti", page_icon="🔬", layout="wide")
-st.title("🔬 Analizzatore Fonti Dati")
+st.set_page_config(page_title="Kriterion Quant - Cruscotto", page_icon="🔱", layout="wide")
+st.title("🔱 Cruscotto di Copertura Kriterion Quant")
+st.markdown("Interfaccia per monitorare i segnali di copertura della strategia composita.")
 
-# ... (La sidebar rimane identica) ...
 config = configparser.ConfigParser()
 config.read('config.ini')
+
+# --- Sidebar ---
 st.sidebar.header("Parametri della Strategia")
 st.sidebar.subheader("Trading")
 capitale = config.getfloat('STRATEGY_PARAMS', 'capitale_iniziale')
@@ -32,37 +33,32 @@ st.sidebar.metric("Soglia Superiore VIX", f"{vix_upper}")
 st.sidebar.metric("Soglia Inferiore VIX", f"{vix_lower}")
 
 
-st.header("Test di Download Dati")
+# --- Pannello Principale ---
+st.header("Generatore di Segnale Giornaliero")
 
-if st.button("Esegui Download e Analizza Fonti"):
-    with st.spinner("Download dati in corso..."):
+if st.button("Esegui Analisi e Genera Segnale"):
+    with st.spinner("Download dati..."):
         fred_series_str = config.get('DATA', 'fred_series_cmi')
         tickers = ['SPY', 'ES=F', '^VIX', '^VIX3M']
         market_data, cmi_data = fetch_all_data(fred_series_str, tickers)
-    st.success("Test di download completato.")
+    st.success("Download dati completato.")
 
-    st.markdown("---")
-    st.subheader("Analisi `market_data` (da Yahoo Finance)")
-    if market_data.empty:
-        st.error("RISULTATO: Il DataFrame `market_data` è VUOTO.")
-    else:
-        st.success("RISULTATO: Il DataFrame `market_data` CONTIENE DATI.")
-        st.write("Ultime 5 righe:")
-        st.dataframe(market_data.tail())
-        buffer = pd.io.common.StringIO()
-        market_data.info(buf=buffer)
-        s = buffer.getvalue()
-        st.text(s)
+    with st.spinner("Calcolo segnali..."):
+        df_signals = calculate_signals(market_data, cmi_data, cmi_window, vix_upper, vix_lower)
+    st.success("Calcolo segnali completato.")
 
-    st.markdown("---")
-    st.subheader("Analisi `cmi_data` (da FRED)")
-    if cmi_data.empty:
-        st.error("RISULTATO: Il DataFrame `cmi_data` è VUOTO.")
+    if df_signals.empty:
+        st.warning("Calcolo completato, ma nessun segnale valido generato per l'intervallo di date corrente.")
     else:
-        st.success("RISULTATO: Il DataFrame `cmi_data` CONTIENE DATI.")
-        st.write("Ultime 5 righe:")
-        st.dataframe(cmi_data.tail())
-        buffer = pd.io.common.StringIO()
-        cmi_data.info(buf=buffer)
-        s = buffer.getvalue()
-        st.text(s)
+        latest_signal = df_signals.iloc[-1]
+        current_date = latest_signal.name.strftime('%Y-%m-%d')
+
+        st.subheader(f"Segnale calcolato per il: {current_date}")
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Segnale CMI", f"{int(latest_signal['Signal_CMI'])}")
+        col2.metric("Segnale VIX Ratio", f"{int(latest_signal['Signal_VIX'])}")
+        col3.metric("Tranche di Copertura", f"{int(latest_signal['Signal_Count'])}")
+        
+        st.subheader("Tabella Dati Recenti")
+        st.dataframe(df_signals.tail(10))
