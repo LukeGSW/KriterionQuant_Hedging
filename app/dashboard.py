@@ -1,5 +1,6 @@
 # app/dashboard.py
 # VERSIONE FINALE E UNIFICATA - Tutta la logica in un unico posto
+import configparser
 import streamlit as st
 import pandas as pd
 import yfinance as yf
