@@ -154,6 +154,7 @@ def plotly_trades_chart(df_results, title):
     fig.update_layout(title=title, template='plotly_dark', yaxis_type="log", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     return fig
 
+
 def plotly_individual_signals_chart(df_results):
     df = df_results.copy()
     cmi_trades = df[df['Signal_CMI'].diff() != 0]
@@ -164,14 +165,16 @@ def plotly_individual_signals_chart(df_results):
     cmi_entries = cmi_trades[cmi_trades['Signal_CMI'] == 1]; cmi_exits = cmi_trades[cmi_trades['Signal_CMI'] == 0]
     vix_entries = vix_trades[vix_trades['Signal_VIX'] == 1]; vix_exits = vix_trades[vix_trades['Signal_VIX'] == 0]
 
+    # Plot segnali CMI
     fig.add_trace(go.Scatter(x=cmi_entries.index, y=cmi_entries['SPY_Close'], mode='markers', name='Entrata CMI', marker=dict(color='orange', symbol='triangle-down', size=12, line=dict(width=1, color='black'))))
     fig.add_trace(go.Scatter(x=cmi_exits.index, y=cmi_exits['SPY_Close'], mode='markers', name='Uscita CMI', marker=dict(color='orange', symbol='triangle-up', size=12, line=dict(width=1, color='black'))))
-    fig.add_trace(go.Scatter(x=vix_entries.index, y=vix_entries['SPY_Close'], mode='markers', name='Entrata VIX', marker=dict(color='magenta', symbol='diamond-down', size=9)))
-    fig.add_trace(go.Scatter(x=vix_exits.index, y=vix_exits['SPY_Close'], mode='markers', name='Uscita VIX', marker=dict(color='magenta', symbol='diamond-up', size=9)))
+    
+    # Plot segnali VIX con simboli corretti
+    fig.add_trace(go.Scatter(x=vix_entries.index, y=vix_entries['SPY_Close'], mode='markers', name='Entrata VIX', marker=dict(color='magenta', symbol='cross', size=9)))
+    fig.add_trace(go.Scatter(x=vix_exits.index, y=vix_exits['SPY_Close'], mode='markers', name='Uscita VIX', marker=dict(color='magenta', symbol='x', size=9)))
     
     fig.update_layout(title='Prezzo SPY con Segnali Individuali', template='plotly_dark', yaxis_type="log", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     return fig
-
 # ==============================================================================
 # INTERFACCIA STREAMLIT
 # ==============================================================================
