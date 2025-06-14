@@ -1,5 +1,5 @@
 # app/dashboard.py
-# VERSIONE FINALE con logica di STOP LOSS CUMULATIVO CORRETTA
+# VERSIONE FINALE E DEFINITIVA - REPLICA 1:1 DELLA LOGICA DEL NOTEBOOK
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -11,7 +11,14 @@ import matplotlib.pyplot as plt
 import datetime
 
 def run_full_strategy(params, start_date, end_date):
-    st.info("Passo 1/4: Download di tutti i dati storici...")
+    """
+    Funzione unica e auto-contenuta che esegue l'intera pipeline,
+    replicando fedelmente la logica del notebook originale.
+    """
+    # --------------------------------------------------------------------------
+    # STEP 1 & 2: DOWNLOAD, PREPARAZIONE E CALCOLO SEGNALI
+    # --------------------------------------------------------------------------
+    st.info("Passo 1/3: Download e preparazione dati...")
     CAPITALE_INIZIALE = params['capitale_iniziale']
     all_tickers = ['SPY', 'ES=F', '^VIX', '^VIX3M']
     fred_series_cmi = {'TED_Spread': 'TEDRATE', 'Yield_Curve_10Y2Y': 'T10Y2Y', 'VIX': 'VIXCLS', 'High_Yield_Spread': 'BAMLH0A0HYM2'}
@@ -22,30 +29,28 @@ def run_full_strategy(params, start_date, end_date):
         for name, ticker in fred_series_cmi.items(): cmi_data_dict[name] = web.DataReader(ticker, 'fred', start_date, end_date)
         cmi_data = pd.concat(cmi_data_dict.values(), axis=1, sort=False).ffill()
         cmi_data.columns = fred_series_cmi.keys()
-        if 'TED_Spread' in cmi_data.columns and cmi_data['TED_Spread'].isnull().all(): cmi_data = cmi_data.drop(columns=['TED_Spread'])
+        if 'TED_Spread' in cmi_data.columns and cmi_data['TED_Spread'].isnull().all():
+            cmi_data = cmi_data.drop(columns=['TED_Spread'])
     except Exception as e:
         st.error(f"Errore nel download dei dati da FRED: {e}"); return None, None, None, None, None, None, None
 
-    st.info("Passo 2/4: Preparazione e calcolo dei segnali...")
     df = pd.DataFrame()
     for ticker in all_tickers:
         prefix = ticker.replace('=F', '').replace('^', '')
         for col_type in ['Open', 'High', 'Low', 'Close', 'Volume']:
             try: df[f'{prefix}_{col_type}'] = market_data[(col_type, ticker)]
             except KeyError: pass
-    df = df.join(cmi_data).ffill()
+    df = df.join(cmi_data)
     
-    colonne_essenziali = ['SPY_Open', 'SPY_Close', 'ES_Open', 'ES_Close', 'VIX_Close', 'VIX3M_Close']
-    df.dropna(subset=colonne_essenziali, inplace=True)
-
     cmi_cols = [col for col in fred_series_cmi.keys() if col in df.columns]
-    cmi_data_clean = df[cmi_cols].dropna()
+    cmi_data_clean = df[cmi_cols]
     cmi_data_zscore = cmi_data_clean.apply(zscore)
     if 'Yield_Curve_10Y2Y' in cmi_data_zscore.columns: cmi_data_zscore['Yield_Curve_10Y2Y'] *= -1
         
     df['CMI_ZScore'] = cmi_data_zscore.mean(axis=1)
     df['CMI_MA'] = df['CMI_ZScore'].rolling(window=int(params['cmi_ma_window'])).mean()
-    df.dropna(subset=['CMI_MA'], inplace=True)
+    
+    df.dropna(inplace=True) # Pulizia aggressiva, come da notebook originale
     
     if df.empty:
         st.error("Il DataFrame è diventato vuoto dopo la pulizia dei dati."); return None, None, None, None, None, None, None
@@ -62,15 +67,16 @@ def run_full_strategy(params, start_date, end_date):
     df['Signal_VIX'] = signal_vix
     df['Signal_Count'] = df['Signal_CMI'] + df['Signal_VIX']
 
-    st.info("Passo 3/4: Esecuzione del backtest...")
+    # --------------------------------------------------------------------------
+    # STEP 3: ESECUZIONE BACKTEST (Copia 1:1 della logica del notebook)
+    # --------------------------------------------------------------------------
+    st.info("Passo 2/3: Esecuzione del backtest...")
+    
     initial_spy_price = df['SPY_Open'].iloc[0]
     spy_shares = CAPITALE_INIZIALE / initial_spy_price
-    cash_from_hedging, es_contracts, hedge_entry_price, current_tranches = 0.0, 0.0, 0.0, 0
+    cash_from_hedging, es_contracts, hedge_entry_price, current_tranches = 0.0, 0, 0, 0
     portfolio_history = [{'Date': df.index[0], 'Portfolio_Value': CAPITALE_INIZIALE, 'MES_Contracts': 0}]
     hedge_trades_count, hedge_stopped_out, stop_loss_events = 0, False, 0
-    
-    # Variabili per il calcolo del prezzo medio
-    total_cost_of_position = 0.0
 
     for i in range(len(df) - 1):
         target_tranches = df['Signal_Count'].iloc[i]
@@ -80,7 +86,7 @@ def run_full_strategy(params, start_date, end_date):
         if current_tranches > 0:
             if row_T1['ES_Open'] > hedge_entry_price * (1 + params['stop_loss_threshold_hedge']):
                 realized_hedge_pnl_today = es_contracts * (row_T1['ES_Open'] - hedge_entry_price) * params['micro_es_multiplier']
-                es_contracts, current_tranches, hedge_stopped_out, total_cost_of_position = 0.0, 0, True, 0.0
+                es_contracts, current_tranches, hedge_stopped_out = 0, 0, True
                 stop_loss_events += 1
             elif target_tranches < current_tranches:
                 contracts_per_tranche = es_contracts / current_tranches
@@ -88,9 +94,6 @@ def run_full_strategy(params, start_date, end_date):
                 realized_hedge_pnl_today = contracts_to_close * (row_T1['ES_Open'] - hedge_entry_price) * params['micro_es_multiplier']
                 es_contracts -= contracts_to_close
                 current_tranches = target_tranches
-                # Aggiorna il costo totale dopo la chiusura parziale
-                if es_contracts != 0: total_cost_of_position = es_contracts * hedge_entry_price
-                else: total_cost_of_position = 0.0
 
         if target_tranches == 0: hedge_stopped_out = False
             
@@ -98,21 +101,11 @@ def run_full_strategy(params, start_date, end_date):
             tranches_to_add = target_tranches - current_tranches
             portfolio_value_at_entry = (spy_shares * row_T1['SPY_Open']) + cash_from_hedging
             notional_per_tranche = portfolio_value_at_entry * params['hedge_percentage_per_tranche']
+            if current_tranches == 0:
+                hedge_entry_price = row_T1['ES_Open']
+                hedge_trades_count += 1
             contracts_to_add = - (notional_per_tranche / (row_T1['ES_Open'] * params['micro_es_multiplier'])) * tranches_to_add
-
-            # =================== LOGICA PREZZO MEDIO PONDERATO ===================
-            # Aggiorna il costo totale della posizione e ricalcola il prezzo medio
-            cost_of_new_contracts = contracts_to_add * row_T1['ES_Open']
-            total_cost_of_position += cost_of_new_contracts
-            
-            new_total_contracts = es_contracts + contracts_to_add
-            if new_total_contracts != 0:
-                hedge_entry_price = total_cost_of_position / new_total_contracts
-            # ===================================================================
-
-            if current_tranches == 0: hedge_trades_count += 1
-
-            es_contracts = new_total_contracts
+            es_contracts += contracts_to_add
             current_tranches = target_tranches
 
         cash_from_hedging += realized_hedge_pnl_today
@@ -130,11 +123,10 @@ def run_full_strategy(params, start_date, end_date):
     
     equity_curves = pd.DataFrame({'Strategy_Equity': results_df_final['Portfolio_Value'], 'Buy_And_Hold_Equity': cumulative_benchmark}).dropna()
     df_con_risultati = df.join(results_df_final[['MES_Contracts']]).ffill()
-    log_df = pd.DataFrame() # Il log di debug non è più necessario con la logica corretta
+    
+    st.info("Passo 3/3: Calcolo metriche e grafici...")
+    return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count, stop_loss_events, df_con_risultati
 
-    return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count, stop_loss_events, df_con_risultati, log_df
-
-# (Le funzioni 'calculate_metrics' e 'plot_trades_on_chart' e l'interfaccia Streamlit rimangono identiche a prima)
 def calculate_metrics(returns, total_trades, stop_loss_events, trading_days=252):
     metrics = {"Numero di Trade di Copertura": total_trades, "Numero di Stop Loss": stop_loss_events}
     cumulative_returns = (1 + returns).cumprod()
@@ -147,8 +139,7 @@ def calculate_metrics(returns, total_trades, stop_loss_events, trading_days=252)
     metrics.update({"Rendimento Totale": f"{total_return:.2%}", "CAGR (ann.)": f"{cagr:.2%}", "Volatilità (ann.)": f"{volatility:.2%}", "Sharpe Ratio": f"{sharpe_ratio:.2f}", "Max Drawdown": f"{max_drawdown:.2%}", "Calmar Ratio": f"{calmar_ratio:.2f}"})
     return metrics
 def plot_trades_on_chart(df_results):
-    trade_points = df_results[df_results['MES_Contracts'].diff() != 0].copy()
-    fig, ax = plt.subplots(figsize=(15, 8), facecolor='#0E1117'); ax.set_facecolor('#0E1117')
+    trade_points = df_results[df_results['MES_Contracts'].diff() != 0].copy(); fig, ax = plt.subplots(figsize=(15, 8), facecolor='#0E1117'); ax.set_facecolor('#0E1117')
     ax.plot(df_results.index, df_results['SPY_Close'], label='Prezzo SPY', color='cyan', lw=1, zorder=1)
     aumento_copertura = trade_points[trade_points['MES_Contracts'] < trade_points['MES_Contracts'].shift(1).fillna(0)]
     riduzione_copertura = trade_points[trade_points['MES_Contracts'] > trade_points['MES_Contracts'].shift(1).fillna(0)]
@@ -158,6 +149,10 @@ def plot_trades_on_chart(df_results):
         ax.annotate(f"{int(row['MES_Contracts'])}", (idx, row['SPY_Close']), textcoords="offset points", xytext=(0,15), ha='center', fontsize=9, color='white', bbox=dict(boxstyle="round,pad=0.3", fc="black", ec="none", lw=0, alpha=0.7))
     ax.set_title('Prezzo SPY con Operazioni di Copertura', color='white', fontsize=16); ax.set_ylabel('Prezzo ($)', color='white'); ax.set_yscale('log'); ax.tick_params(axis='x', colors='white'); ax.tick_params(axis='y', colors='white'); ax.legend(); plt.grid(True, which='both', linestyle='--', linewidth=0.3, color='gray'); plt.tight_layout()
     return fig
+
+# ==============================================================================
+# INTERFACCIA STREAMLIT
+# ==============================================================================
 st.set_page_config(page_title="Kriterion Quant - Dashboard", page_icon="🔱", layout="wide")
 st.title("🔱 Dashboard Strategia di Copertura")
 config = configparser.ConfigParser(); config.read('config.ini')
@@ -178,20 +173,24 @@ with tab1:
     if st.button("Calcola Segnale Odierno"):
         with st.spinner("Calcolo in corso..."):
             end_date = datetime.date.today()
-            start_date_recent = end_date - datetime.timedelta(days=3*365)
-            _, _, _, _, _, df_results, _ = run_full_strategy(params_dict, start_date_recent, end_date)
-            if df_results is not None and not df_results.empty:
-                latest_signal_row = df_results.iloc[-1]
-                st.subheader(f"Segnale per il {latest_signal_row.name.strftime('%Y-%m-%d')}")
-                col1, col2, col3 = st.columns(3); col1.metric("Segnale CMI", int(latest_signal_row['Signal_CMI'])); col2.metric("Segnale VIX Ratio", int(latest_signal_row['Signal_VIX']))
-                col3.metric("Tranche di Copertura", int(latest_signal_row['Signal_Count']), help=f"Numero di tranche di copertura da applicare. Corrispondono a {int(latest_signal_row['MES_Contracts'])} contratti MES.")
+            start_date_recent = end_date - datetime.timedelta(days=4*365) # Aumentato lo storico per il calcolo MA
+            results = run_full_strategy(params_dict, start_date_recent, end_date)
+            if results is not None:
+                _, _, _, _, _, df_results = results
+                if not df_results.empty:
+                    latest_signal_row = df_results.iloc[-1]
+                    st.subheader(f"Segnale per il {latest_signal_row.name.strftime('%Y-%m-%d')}")
+                    col1, col2, col3 = st.columns(3); col1.metric("Segnale CMI", int(latest_signal_row['Signal_CMI'])); col2.metric("Segnale VIX Ratio", int(latest_signal_row['Signal_VIX']))
+                    col3.metric("Tranche di Copertura", int(latest_signal_row['Signal_Count']), help=f"Corrispondono a {int(latest_signal_row['MES_Contracts'])} contratti MES.")
+                else: st.warning("Nessun segnale calcolabile per il periodo recente.")
             else: st.error("Impossibile calcolare il segnale odierno.")
 with tab2:
     st.header("Esegui un backtest completo sulla base dei parametri della sidebar")
     if st.button("Avvia Backtest Storico Completo"):
         with st.spinner("Esecuzione completa della strategia in corso..."):
-            equity_curves, strategy_returns, benchmark_returns, trades, stop_losses, df_final_results, stop_loss_log_df = run_full_strategy(params_dict, start_date_input, datetime.date.today())
-            if equity_curves is not None:
+            results = run_full_strategy(params_dict, start_date_input, datetime.date.today())
+            if results is not None:
+                equity_curves, strategy_returns, benchmark_returns, trades, stop_losses, df_final_results = results
                 st.success("Esecuzione completata con successo!")
                 strategy_metrics = calculate_metrics(strategy_returns, trades, stop_losses)
                 benchmark_metrics = calculate_metrics(benchmark_returns, 0, 0)
@@ -199,7 +198,4 @@ with tab2:
                 st.subheader("Grafico Operazioni di Copertura"); st.pyplot(plot_trades_on_chart(df_final_results))
                 st.subheader("Equity Line Storica"); st.line_chart(equity_curves)
                 st.subheader("Metriche di Performance"); st.table(metrics_df)
-                if not stop_loss_log_df.empty:
-                    with st.expander("🔬 Clicca qui per analizzare il Log dettagliato dello Stop Loss"):
-                        st.dataframe(stop_loss_log_df)
             else: st.error("Esecuzione del backtest fallita.")
