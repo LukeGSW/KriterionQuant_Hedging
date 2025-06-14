@@ -1,5 +1,5 @@
 # app/dashboard.py
-# VERSIONE FINALE CON GRAFICI INTERATTIVI PLOTLY
+# VERSIONE FINALE E COMPLETA con tutte le funzionalità richieste
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -7,13 +7,14 @@ import pandas_datareader.data as web
 import numpy as np
 import configparser
 from scipy.stats import zscore
+import plotly.graph_objects as go
 import datetime
-import plotly.graph_objects as go # Importa Plotly
 
 # ==============================================================================
-# FUNZIONE STRATEGIA (invariata)
+# FUNZIONE UNICA CHE CONTIENE TUTTA LA STRATEGIA DAL NOTEBOOK
 # ==============================================================================
 def run_full_strategy(params, start_date, end_date):
+    st.info(f"Passo 1/3: Download di tutti i dati storici dal {start_date.strftime('%Y-%m-%d')}...")
     CAPITALE_INIZIALE = params['capitale_iniziale']
     all_tickers = ['SPY', 'ES=F', '^VIX', '^VIX3M']
     fred_series_cmi = {'TED_Spread': 'TEDRATE', 'Yield_Curve_10Y2Y': 'T10Y2Y', 'VIX': 'VIXCLS', 'High_Yield_Spread': 'BAMLH0A0HYM2'}
@@ -24,11 +25,11 @@ def run_full_strategy(params, start_date, end_date):
         for name, ticker in fred_series_cmi.items(): cmi_data_dict[name] = web.DataReader(ticker, 'fred', start_date, end_date)
         cmi_data = pd.concat(cmi_data_dict.values(), axis=1, sort=False).ffill()
         cmi_data.columns = fred_series_cmi.keys()
-        if 'TED_Spread' in cmi_data.columns and cmi_data['TED_Spread'].isnull().all():
-            cmi_data = cmi_data.drop(columns=['TED_Spread'])
+        if 'TED_Spread' in cmi_data.columns and cmi_data['TED_Spread'].isnull().all(): cmi_data = cmi_data.drop(columns=['TED_Spread'])
     except Exception as e:
-        st.error(f"Errore nel download dei dati da FRED: {e}"); return None, None, None, None, None, None
+        st.error(f"Errore nel download dei dati da FRED: {e}"); return None, None, None, None, None, None, None
 
+    st.info("Passo 2/3: Preparazione e calcolo dei segnali...")
     df = pd.DataFrame()
     for ticker in all_tickers:
         prefix = ticker.replace('=F', '').replace('^', '')
@@ -49,7 +50,7 @@ def run_full_strategy(params, start_date, end_date):
     df['CMI_MA'] = df['CMI_ZScore'].rolling(window=int(params['cmi_ma_window'])).mean()
     df.dropna(subset=['CMI_MA'], inplace=True)
     
-    if df.empty: return None, None, None, None, None, None
+    if df.empty: return None, None, None, None, None, None, None
 
     df['Signal_CMI'] = np.where(df['CMI_ZScore'] > df['CMI_MA'], 1, 0)
     df['VIX_Ratio'] = df['VIX_Close'] / df['VIX3M_Close']
@@ -63,10 +64,11 @@ def run_full_strategy(params, start_date, end_date):
     df['Signal_VIX'] = signal_vix
     df['Signal_Count'] = df['Signal_CMI'] + df['Signal_VIX']
 
+    st.info("Passo 3/3: Esecuzione del backtest...")
     initial_spy_price = df['SPY_Open'].iloc[0]
     spy_shares = CAPITALE_INIZIALE / initial_spy_price
     cash_from_hedging, es_contracts, hedge_entry_price, current_tranches = 0.0, 0, 0, 0
-    portfolio_history = [{'Date': df.index[0], 'Portfolio_Value': CAPITALE_INIZIALE, 'MES_Contracts': 0}]
+    portfolio_history = [{'Date': df.index[0], 'Portfolio_Value': CAPITALE_INIZIALE, 'MES_Contracts': 0, 'Hedge_PnL': 0.0}]
     hedge_trades_count, hedge_stopped_out, stop_loss_events = 0, False, 0
 
     for i in range(len(df) - 1):
@@ -102,11 +104,20 @@ def run_full_strategy(params, start_date, end_date):
         spy_position_value = spy_shares * row_T1['SPY_Close']
         unrealized_hedge_pnl = es_contracts * (row_T1['ES_Close'] - hedge_entry_price) * params['micro_es_multiplier'] if current_tranches > 0 else 0
         portfolio_value = spy_position_value + cash_from_hedging + unrealized_hedge_pnl
-        portfolio_history.append({'Date': row_T1.name, 'Portfolio_Value': portfolio_value, 'MES_Contracts': es_contracts})
+        # Calcolo P&L della sola copertura
+        daily_hedge_pnl = realized_hedge_pnl_today + (es_contracts * (row_T1['ES_Close'] - (df.iloc[i]['ES_Close'])) * params['micro_es_multiplier'] if current_tranches > 0 else 0)
+
+        portfolio_history.append({'Date': row_T1.name, 'Portfolio_Value': portfolio_value, 'MES_Contracts': es_contracts, 'Hedge_PnL': daily_hedge_pnl})
         
     results_df_final = pd.DataFrame(portfolio_history).set_index('Date')
     results_df_final['Strategy_Returns'] = results_df_final['Portfolio_Value'].pct_change()
     
+    # Calcolo Max Drawdown delle sole coperture
+    cumulative_hedge_pnl = results_df_final['Hedge_PnL'].cumsum()
+    running_max_pnl = cumulative_hedge_pnl.cummax()
+    hedge_drawdown = cumulative_hedge_pnl - running_max_pnl
+    max_drawdown_hedge_value = hedge_drawdown.min()
+
     benchmark_returns = df['SPY_Close'].pct_change()
     cumulative_benchmark = (1 + benchmark_returns).cumprod() * CAPITALE_INIZIALE
     cumulative_benchmark.iloc[0] = CAPITALE_INIZIALE
@@ -114,14 +125,16 @@ def run_full_strategy(params, start_date, end_date):
     equity_curves = pd.DataFrame({'Strategy_Equity': results_df_final['Portfolio_Value'], 'Buy_And_Hold_Equity': cumulative_benchmark}).dropna()
     df_con_risultati = df.join(results_df_final[['MES_Contracts']]).ffill()
 
-    return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count, stop_loss_events, df_con_risultati
+    return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count, stop_loss_events, max_drawdown_hedge_value, df_con_risultati
 
-# ==============================================================================
-# FUNZIONI DI PLOTTING E METRICHE
-# ==============================================================================
-def calculate_metrics(returns, total_trades, stop_loss_events, trading_days=252):
-    # Logica di calcolo metriche dal notebook
-    metrics = {"Numero di Trade di Copertura": total_trades, "Numero di Stop Loss": stop_loss_events}
+def calculate_metrics(returns, total_trades, stop_loss_events, max_drawdown_hedge, capitale_iniziale, trading_days=252):
+    # Logica di calcolo metriche aggiornata per includere il nuovo valore
+    max_drawdown_hedge_pct = (max_drawdown_hedge / capitale_iniziale) if capitale_iniziale > 0 else 0
+    metrics = {
+        "Numero di Trade di Copertura": total_trades,
+        "Numero di Stop Loss": stop_loss_events,
+        "Max Drawdown Coperture": f"{max_drawdown_hedge_pct:.2%}" # Nuova metrica
+    }
     cumulative_returns = (1 + returns).cumprod()
     if cumulative_returns.empty or pd.isna(cumulative_returns.iloc[-1]): return {**metrics, **{k: "N/A" for k in ["Rendimento Totale", "CAGR (ann.)", "Volatilità (ann.)", "Sharpe Ratio", "Max Drawdown", "Calmar Ratio"]}}
     total_return = cumulative_returns.iloc[-1] - 1; num_years = len(returns) / trading_days if len(returns) > 0 else 0
@@ -136,45 +149,28 @@ def plotly_trades_chart(df_results, title):
     # Funzione di plotting interattiva con Plotly
     trade_points = df_results[df_results['MES_Contracts'].diff() != 0].copy()
     fig = go.Figure()
-
-    # Grafico del prezzo di SPY
     fig.add_trace(go.Scatter(x=df_results.index, y=df_results['SPY_Close'], mode='lines', name='Prezzo SPY', line=dict(color='cyan', width=1)))
-
-    # Aggiungi markers per i trade
     aumento_copertura = trade_points[trade_points['MES_Contracts'] < trade_points['MES_Contracts'].shift(1).fillna(0)]
     riduzione_copertura = trade_points[trade_points['MES_Contracts'] > trade_points['MES_Contracts'].shift(1).fillna(0)]
-    
     fig.add_trace(go.Scatter(x=aumento_copertura.index, y=aumento_copertura['SPY_Close'], mode='markers', name='Aumento Copertura', marker=dict(color='red', symbol='triangle-down', size=10)))
     fig.add_trace(go.Scatter(x=riduzione_copertura.index, y=riduzione_copertura['SPY_Close'], mode='markers', name='Riduzione Copertura', marker=dict(color='lime', symbol='triangle-up', size=10)))
-
-    # Aggiungi etichette con il numero di contratti
     for _, row in trade_points.iterrows():
         fig.add_annotation(x=row.name, y=row['SPY_Close'], text=f"<b>{int(row['MES_Contracts'])}</b>", showarrow=False, yshift=15, font=dict(color="white", size=10), bgcolor="rgba(0,0,0,0.5)")
-
     fig.update_layout(title=title, template='plotly_dark', yaxis_type="log", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     return fig
 
-
 def plotly_individual_signals_chart(df_results):
-    df = df_results.copy()
-    cmi_trades = df[df['Signal_CMI'].diff() != 0]
-    vix_trades = df[df['Signal_VIX'].diff() != 0]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df['SPY_Close'], mode='lines', name='Prezzo SPY', line=dict(color='cyan', width=1)))
-
+    df = df_results.copy(); cmi_trades = df[df['Signal_CMI'].diff() != 0]; vix_trades = df[df['Signal_VIX'].diff() != 0]
+    fig = go.Figure(); fig.add_trace(go.Scatter(x=df.index, y=df['SPY_Close'], mode='lines', name='Prezzo SPY', line=dict(color='cyan', width=1)))
     cmi_entries = cmi_trades[cmi_trades['Signal_CMI'] == 1]; cmi_exits = cmi_trades[cmi_trades['Signal_CMI'] == 0]
     vix_entries = vix_trades[vix_trades['Signal_VIX'] == 1]; vix_exits = vix_trades[vix_trades['Signal_VIX'] == 0]
-
-    # Plot segnali CMI
     fig.add_trace(go.Scatter(x=cmi_entries.index, y=cmi_entries['SPY_Close'], mode='markers', name='Entrata CMI', marker=dict(color='orange', symbol='triangle-down', size=12, line=dict(width=1, color='black'))))
     fig.add_trace(go.Scatter(x=cmi_exits.index, y=cmi_exits['SPY_Close'], mode='markers', name='Uscita CMI', marker=dict(color='orange', symbol='triangle-up', size=12, line=dict(width=1, color='black'))))
-    
-    # Plot segnali VIX con simboli corretti
     fig.add_trace(go.Scatter(x=vix_entries.index, y=vix_entries['SPY_Close'], mode='markers', name='Entrata VIX', marker=dict(color='magenta', symbol='cross', size=9)))
     fig.add_trace(go.Scatter(x=vix_exits.index, y=vix_exits['SPY_Close'], mode='markers', name='Uscita VIX', marker=dict(color='magenta', symbol='x', size=9)))
-    
     fig.update_layout(title='Prezzo SPY con Segnali Individuali', template='plotly_dark', yaxis_type="log", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     return fig
+
 # ==============================================================================
 # INTERFACCIA STREAMLIT
 # ==============================================================================
@@ -200,27 +196,21 @@ tab1, tab2 = st.tabs(["📊 Segnale Odierno", "📜 Backtest Storico"])
 
 with tab1:
     st.header("Visualizza il segnale di copertura e i grafici degli indicatori")
-    st.markdown("Questa sezione calcola i segnali sull'ultimo periodo per un'analisi rapida.")
     if st.button("Calcola Segnale e Grafici"):
         with st.spinner("Calcolo in corso..."):
             end_date = datetime.date.today()
-            start_date_recent = end_date - datetime.timedelta(days=2*365) 
-            
+            start_date_recent = end_date - datetime.timedelta(days=2*365)
             results = run_full_strategy(params_dict, start_date_recent, end_date)
-            
             if results is not None:
                 _, _, _, _, _, df_results = results
                 if not df_results.empty:
                     df_last_year = df_results.last('365D')
                     latest_signal_row = df_results.iloc[-1]
-                    
                     st.subheader(f"Segnale per il {latest_signal_row.name.strftime('%Y-%m-%d')}")
                     col1, col2, col3 = st.columns(3); col1.metric("Segnale CMI", int(latest_signal_row['Signal_CMI'])); col2.metric("Segnale VIX Ratio", int(latest_signal_row['Signal_VIX']))
                     col3.metric("Tranche di Copertura", int(latest_signal_row['Signal_Count']))
-
                     st.markdown("---")
                     st.subheader("Grafici Indicatori (ultimo anno)")
-
                     vix_plot_df = pd.DataFrame({'VIX_Ratio': df_last_year['VIX_Ratio'], 'Soglia Superiore': params_dict['vix_ratio_upper_threshold'], 'Soglia Inferiore': params_dict['vix_ratio_lower_threshold']})
                     st.line_chart(vix_plot_df, color=["#FF00FF", "#808080", "#808080"])
                     st.line_chart(df_last_year[['CMI_ZScore', 'CMI_MA']])
@@ -234,11 +224,11 @@ with tab2:
         with st.spinner("Esecuzione completa della strategia in corso..."):
             results = run_full_strategy(params_dict, start_date_input, datetime.date.today())
             if results is not None:
-                equity_curves, strategy_returns, benchmark_returns, trades, stop_losses, df_final_results = results
+                equity_curves, strategy_returns, benchmark_returns, trades, stop_losses, max_drawdown_hedge, df_final_results = results
                 st.success("Esecuzione completata con successo!")
                 
-                strategy_metrics = calculate_metrics(strategy_returns, trades, stop_losses)
-                benchmark_metrics = calculate_metrics(benchmark_returns, 0, 0)
+                strategy_metrics = calculate_metrics(strategy_returns, trades, stop_losses, max_drawdown_hedge, params_dict['capitale_iniziale'])
+                benchmark_metrics = calculate_metrics(benchmark_returns, 0, 0, 0, params_dict['capitale_iniziale'])
                 metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics})
                 
                 st.subheader("Grafico Operazioni di Copertura"); st.plotly_chart(plotly_trades_chart(df_final_results, 'Prezzo SPY con Operazioni di Copertura (Backtest)'), use_container_width=True)
