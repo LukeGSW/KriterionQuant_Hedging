@@ -5,7 +5,7 @@ name: Daily Hedging Signal
 on:
   # Esegue lo script ogni giorno alle 07:00 UTC (09:00 ora italiana/greca in estate)
   schedule:
-    - cron: '1 22 * * *'
+    - cron: '1 22 * * 0-4'
   
   # Permette di eseguire lo script manualmente dalla tab "Actions" di GitHub
   workflow_dispatch:
