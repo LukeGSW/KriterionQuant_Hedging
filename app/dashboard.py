@@ -197,63 +197,64 @@ def plotly_individual_signals_chart(df_results):
 # ==============================================================================
 # INTERFACCIA STREAMLIT
 # ==============================================================================
-st.set_page_config(page_title="Kriterion Quant - Dashboard", page_icon="🔱", layout="wide")
-st.title("🔱 Dashboard Strategia di Copertura")
-
-config = configparser.ConfigParser(); config.read('config.ini')
-default_params = dict(config['STRATEGY_PARAMS'])
-for key, value in default_params.items():
-    try: default_params[key] = float(value)
-    except ValueError: pass
-
-st.sidebar.title("Parametri di Simulazione")
-start_date_input = st.sidebar.date_input("Data Inizio Backtest", value=pd.to_datetime('2007-01-01'), min_value=pd.to_datetime('2005-01-01'), max_value=datetime.date.today())
-capital_input = st.sidebar.number_input("Capitale Iniziale ($)", value=default_params['capitale_iniziale'], min_value=1000.0, step=1000.0, format="%.2f")
-hedge_perc_input = st.sidebar.slider("Hedge % per Tranche", min_value=0.1, max_value=2.0, value=default_params['hedge_percentage_per_tranche'], step=0.025, format="%.3f")
-stop_loss_input = st.sidebar.slider("Stop Loss sulla Copertura (%)", min_value=0.01, max_value=0.20, value=default_params['stop_loss_threshold_hedge'], step=0.01, format="%.2f")
-
-params_dict = default_params.copy()
-params_dict['capitale_iniziale'] = capital_input; params_dict['hedge_percentage_per_tranche'] = hedge_perc_input; params_dict['stop_loss_threshold_hedge'] = stop_loss_input
-
-tab1, tab2 = st.tabs(["📊 Segnale Odierno", "📜 Backtest Storico"])
-
-with tab1:
-    st.header("Visualizza il segnale di copertura e i grafici degli indicatori")
-    if st.button("Calcola Segnale e Grafici"):
-        with st.spinner("Calcolo in corso..."):
-            end_date = datetime.date.today()
-            start_date_recent = end_date - datetime.timedelta(days=2*365)
-            results = run_full_strategy(params_dict, start_date_recent, end_date)
-            if results is not None:
-                _, _, _, _, _, df_results = results
-                if not df_results.empty:
-                    df_last_year = df_results.last('365D')
-                    latest_signal_row = df_results.iloc[-1]
-                    st.subheader(f"Segnale per il {latest_signal_row.name.strftime('%Y-%m-%d')}")
-                    col1, col2, col3 = st.columns(3); col1.metric("Segnale CMI", int(latest_signal_row['Signal_CMI'])); col2.metric("Segnale VIX Ratio", int(latest_signal_row['Signal_VIX']))
-                    col3.metric("Tranche di Copertura", int(latest_signal_row['Signal_Count']))
-                    st.markdown("---")
-                    st.subheader("Grafici Indicatori (ultimo anno)")
-                    vix_plot_df = pd.DataFrame({'VIX_Ratio': df_last_year['VIX_Ratio'], 'Soglia Superiore': params_dict['vix_ratio_upper_threshold'], 'Soglia Inferiore': params_dict['vix_ratio_lower_threshold']})
-                    st.line_chart(vix_plot_df, color=["#FF00FF", "#808080", "#808080"])
-                    st.line_chart(df_last_year[['CMI_ZScore', 'CMI_MA']])
-                    st.plotly_chart(plotly_individual_signals_chart(df_last_year), use_container_width=True)
-                else: st.warning("Nessun segnale calcolabile per il periodo recente.")
-            else: st.error("Impossibile calcolare il segnale odierno.")
-
-with tab2:
-    st.header("Esegui un backtest completo sulla base dei parametri della sidebar")
-    if st.button("Avvia Backtest Storico Completo"):
-        with st.spinner("Esecuzione completa della strategia in corso..."):
-            results = run_full_strategy(params_dict, start_date_input, datetime.date.today())
-            if results is not None:
-                equity_curves, strategy_returns, benchmark_returns, trades, stop_losses, df_final_results = results
-                st.success("Esecuzione completata con successo!")
-                
-                strategy_metrics, benchmark_metrics = calculate_metrics(strategy_returns, benchmark_returns, trades, stop_losses, df_final_results)
-                metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics})
-                
-                st.subheader("Grafico Operazioni di Copertura"); st.plotly_chart(plotly_trades_chart(df_final_results, 'Prezzo SPY con Operazioni di Copertura (Backtest)'), use_container_width=True)
-                st.subheader("Equity Line Storica"); st.line_chart(equity_curves)
-                st.subheader("Metriche di Performance"); st.table(metrics_df)
-            else: st.error("Esecuzione del backtest fallita.")
+if __name__ == '__main__':
+    st.set_page_config(page_title="Kriterion Quant - Dashboard", page_icon="🔱", layout="wide")
+    st.title("🔱 Dashboard Strategia di Copertura")
+    
+    config = configparser.ConfigParser(); config.read('config.ini')
+    default_params = dict(config['STRATEGY_PARAMS'])
+    for key, value in default_params.items():
+        try: default_params[key] = float(value)
+        except ValueError: pass
+    
+    st.sidebar.title("Parametri di Simulazione")
+    start_date_input = st.sidebar.date_input("Data Inizio Backtest", value=pd.to_datetime('2007-01-01'), min_value=pd.to_datetime('2005-01-01'), max_value=datetime.date.today())
+    capital_input = st.sidebar.number_input("Capitale Iniziale ($)", value=default_params['capitale_iniziale'], min_value=1000.0, step=1000.0, format="%.2f")
+    hedge_perc_input = st.sidebar.slider("Hedge % per Tranche", min_value=0.1, max_value=2.0, value=default_params['hedge_percentage_per_tranche'], step=0.025, format="%.3f")
+    stop_loss_input = st.sidebar.slider("Stop Loss sulla Copertura (%)", min_value=0.01, max_value=0.20, value=default_params['stop_loss_threshold_hedge'], step=0.01, format="%.2f")
+    
+    params_dict = default_params.copy()
+    params_dict['capitale_iniziale'] = capital_input; params_dict['hedge_percentage_per_tranche'] = hedge_perc_input; params_dict['stop_loss_threshold_hedge'] = stop_loss_input
+    
+    tab1, tab2 = st.tabs(["📊 Segnale Odierno", "📜 Backtest Storico"])
+    
+    with tab1:
+        st.header("Visualizza il segnale di copertura e i grafici degli indicatori")
+        if st.button("Calcola Segnale e Grafici"):
+            with st.spinner("Calcolo in corso..."):
+                end_date = datetime.date.today()
+                start_date_recent = end_date - datetime.timedelta(days=2*365)
+                results = run_full_strategy(params_dict, start_date_recent, end_date)
+                if results is not None:
+                    _, _, _, _, _, df_results = results
+                    if not df_results.empty:
+                        df_last_year = df_results.last('365D')
+                        latest_signal_row = df_results.iloc[-1]
+                        st.subheader(f"Segnale per il {latest_signal_row.name.strftime('%Y-%m-%d')}")
+                        col1, col2, col3 = st.columns(3); col1.metric("Segnale CMI", int(latest_signal_row['Signal_CMI'])); col2.metric("Segnale VIX Ratio", int(latest_signal_row['Signal_VIX']))
+                        col3.metric("Tranche di Copertura", int(latest_signal_row['Signal_Count']))
+                        st.markdown("---")
+                        st.subheader("Grafici Indicatori (ultimo anno)")
+                        vix_plot_df = pd.DataFrame({'VIX_Ratio': df_last_year['VIX_Ratio'], 'Soglia Superiore': params_dict['vix_ratio_upper_threshold'], 'Soglia Inferiore': params_dict['vix_ratio_lower_threshold']})
+                        st.line_chart(vix_plot_df, color=["#FF00FF", "#808080", "#808080"])
+                        st.line_chart(df_last_year[['CMI_ZScore', 'CMI_MA']])
+                        st.plotly_chart(plotly_individual_signals_chart(df_last_year), use_container_width=True)
+                    else: st.warning("Nessun segnale calcolabile per il periodo recente.")
+                else: st.error("Impossibile calcolare il segnale odierno.")
+    
+    with tab2:
+        st.header("Esegui un backtest completo sulla base dei parametri della sidebar")
+        if st.button("Avvia Backtest Storico Completo"):
+            with st.spinner("Esecuzione completa della strategia in corso..."):
+                results = run_full_strategy(params_dict, start_date_input, datetime.date.today())
+                if results is not None:
+                    equity_curves, strategy_returns, benchmark_returns, trades, stop_losses, df_final_results = results
+                    st.success("Esecuzione completata con successo!")
+                    
+                    strategy_metrics, benchmark_metrics = calculate_metrics(strategy_returns, benchmark_returns, trades, stop_losses, df_final_results)
+                    metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics})
+                    
+                    st.subheader("Grafico Operazioni di Copertura"); st.plotly_chart(plotly_trades_chart(df_final_results, 'Prezzo SPY con Operazioni di Copertura (Backtest)'), use_container_width=True)
+                    st.subheader("Equity Line Storica"); st.line_chart(equity_curves)
+                    st.subheader("Metriche di Performance"); st.table(metrics_df)
+                else: st.error("Esecuzione del backtest fallita.")
