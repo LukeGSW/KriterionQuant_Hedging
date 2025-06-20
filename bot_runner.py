@@ -63,6 +63,8 @@ def run_automated_signal():
         azione = f"Assumere/Mantenere 1 Tranche di copertura ({params['hedge_percentage_per_tranche'] * 100:.3f}%)."
     else: # signal_count >= 2
         azione = f"Assumere/Mantenere {signal_count} Tranches di copertura ({params['hedge_percentage_per_tranche'] * 100 * signal_count:.3f}%)."
+    
+    dashboard_url = "https://kriterionquanthedging-ftyojbunrcy7wjgsj8ajrc.streamlit.app/"
 
     message = (
         f"**Segnale di Copertura Kriterion - {current_date}** 🔱\n\n"
