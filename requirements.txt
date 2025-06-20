@@ -8,3 +8,4 @@ matplotlib
 python-telegram-bot
 configparser
 plotly
+requests
