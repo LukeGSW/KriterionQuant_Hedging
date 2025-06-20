@@ -43,4 +43,4 @@ jobs:
           echo "chat_id = ${{ secrets.TELEGRAM_CHAT_ID }}" >> config.ini
         
       - name: 5. Run the signal generation script
-        run: python src/main.py
+        run: python main.py
