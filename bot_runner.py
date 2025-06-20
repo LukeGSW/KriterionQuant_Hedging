@@ -70,6 +70,8 @@ def run_automated_signal():
         f"*- Indicatore VIX Ratio*: {vix_status}\n\n"
         f"▶️ **Segnale Composito:** {signal_count} Tranche\n"
         f"💰 **Azione Richiesta:** {azione}"
+        f"[Apri Dashboard Interattiva]({dashboard_url})"
+
     )
 
     print("\n--- Invio Notifica Telegram ---")
