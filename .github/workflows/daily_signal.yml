@@ -1,0 +1,46 @@
+# .github/workflows/daily_signal.yml
+
+name: Daily Hedging Signal
+
+on:
+  # Esegue lo script ogni giorno alle 07:00 UTC (09:00 ora italiana/greca in estate)
+  schedule:
+    - cron: '0 7 * * *'
+  
+  # Permette di eseguire lo script manualmente dalla tab "Actions" di GitHub
+  workflow_dispatch:
+
+jobs:
+  run-signal-script:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 1. Check out repository code
+        uses: actions/checkout@v4
+
+      - name: 2. Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10' # Puoi usare la versione di Python che preferisci
+
+      - name: 3. Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 4. Create config.ini file
+        run: |
+          echo "[STRATEGY_PARAMS]" > config.ini
+          echo "cmi_ma_window = 24" >> config.ini
+          echo "vix_ratio_upper_threshold = 1.15" >> config.ini
+          echo "vix_ratio_lower_threshold = 1.0" >> config.ini
+          echo "" >> config.ini
+          echo "[DATA]" >> config.ini
+          echo "fred_series_cmi = UNRATE,CPIAUCSL,T10Y2Y,INDPRO,UMCSENT,DGS2,BAMLH0A0HYM2" >> config.ini
+          echo "" >> config.ini
+          echo "[TELEGRAM]" >> config.ini
+          echo "bot_token = ${{ secrets.TELEGRAM_BOT_TOKEN }}" >> config.ini
+          echo "chat_id = ${{ secrets.TELEGRAM_CHAT_ID }}" >> config.ini
+        
+      - name: 5. Run the signal generation script
+        run: python src/main.py
