@@ -3,11 +3,9 @@
 name: Daily Hedging Signal
 
 on:
-  # Esegue lo script ogni giorno alle 07:00 UTC (09:00 ora italiana/greca in estate)
   schedule:
-    - cron: '1 22 * * 0-4'
+    - cron: '1 22 * * 0-4' # Esegue alle 22:01 UTC dalla Domenica al Giovedì
   
-  # Permette di eseguire lo script manualmente dalla tab "Actions" di GitHub
   workflow_dispatch:
 
 jobs:
@@ -27,20 +25,28 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      # ===============================================================
-      # === NUOVO STEP DI DEBUG - AGGIUNGI QUESTO BLOCCO ===
-      - name: 4. List files in the repository
-        run: ls -R
-      # ===============================================================
-
-      - name: 5. Create config.ini file
+        
+      - name: 4. Create config.ini file
         run: |
           echo "[STRATEGY_PARAMS]" > config.ini
-          # ... e il resto dello step ...
-        
-      - name: 6. Run the signal generation script
-        env:
-          PYTHONPATH: src
-        run: python main.py
-        
+          echo "capitale_iniziale = ${{ vars.CAPITALE_INIZIALE || '50000.00' }}" >> config.ini
+          echo "hedge_percentage_per_tranche = ${{ vars.HEDGE_PERCENTAGE_PER_TRANCHE || '0.875' }}" >> config.ini
+          echo "stop_loss_threshold_hedge = ${{ vars.STOP_LOSS_THRESHOLD_HEDGE || '0.05' }}" >> config.ini
+          echo "micro_es_multiplier = ${{ vars.MICRO_ES_MULTIPLIER || '5' }}" >> config.ini
+          echo "cmi_ma_window = ${{ vars.CMI_MA_WINDOW || '252' }}" >> config.ini
+          echo "vix_ratio_upper_threshold = ${{ vars.VIX_RATIO_UPPER_THRESHOLD || '0.96' }}" >> config.ini
+          echo "vix_ratio_lower_threshold = ${{ vars.VIX_RATIO_LOWER_THRESHOLD || '0.90' }}" >> config.ini
+          echo "" >> config.ini
+          echo "[TELEGRAM]" >> config.ini
+          echo "bot_token = ${{ secrets.TELEGRAM_BOT_TOKEN }}" >> config.ini
+          echo "chat_id = ${{ secrets.TELEGRAM_CHAT_ID }}" >> config.ini
+          echo "" >> config.ini
+          echo "[DATA]" >> config.ini
+          echo "spy_ticker = SPY" >> config.ini
+          echo "es_ticker = ES=F" >> config.ini
+          echo "vix_ticker = ^VIX" >> config.ini
+          echo "vix3m_ticker = ^VIX3M" >> config.ini
+          echo "fred_series_cmi = { 'Yield_Curve_10Y2Y': 'T10Y2Y', 'VIX': 'VIXCLS', 'High_Yield_Spread': 'BAMLH0A0HYM2' }" >> config.ini
+
+      - name: 5. Run the signal generation script
+        run: python bot_runner.py
