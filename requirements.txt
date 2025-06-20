@@ -9,3 +9,4 @@ python-telegram-bot
 configparser
 plotly
 requests
+streamlit
