@@ -50,7 +50,7 @@ def run_full_strategy(params, start_date, end_date):
     
     if df.empty: return None, None, None, None, None, None
 
-    df['Signal_CMI'] = np.where(df['CMI_ZScore'] > df['CMI_MA'], 1, 0)
+    df['Signal_CMI'] = np.where(df['CMI_ZScore'] > df['CMI_MA'], 1, 0).shift(1)
     df['VIX_Ratio'] = df['VIX_Close'] / df['VIX3M_Close']
     signal_vix = [0] * len(df)
     in_hedge_signal = False
