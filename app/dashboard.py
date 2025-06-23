@@ -18,7 +18,36 @@ def run_full_strategy(params, start_date, end_date):
     all_tickers = ['SPY', 'ES=F', '^VIX', '^VIX3M']
     fred_series_cmi = {'TED_Spread': 'TEDRATE', 'Yield_Curve_10Y2Y': 'T10Y2Y', 'VIX': 'VIXCLS', 'High_Yield_Spread': 'BAMLH0A0HYM2'}
     
-    market_data = yf.download(all_tickers, start=start_date, end=end_date, progress=False, auto_adjust=False, no_cache=True)
+    market_data_dfs = {}
+    print("Avvio download dati di mercato ticker per ticker...")
+    for ticker in all_tickers:
+        try:
+            print(f"Scarico {ticker}...")
+            data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
+            if not data.empty:
+                market_data_dfs[ticker] = data
+            else:
+                # Se non ci sono dati, lo segnaliamo ma non blocchiamo tutto
+                print(f"Attenzione: Nessun dato scaricato per {ticker}")
+                # Potremmo voler inserire un DataFrame vuoto per evitare errori dopo
+                # ma per ora lo saltiamo e basta.
+        except Exception as e:
+            print(f"ERRORE CRITICO nel download di {ticker}: {e}")
+            # Se un ticker fondamentale fallisce, potremmo voler uscire
+            # Per ora, continuiamo con gli altri.
+
+    # Controlliamo se abbiamo scaricato almeno qualche dato
+    if not market_data_dfs:
+        st.error("Download di tutti i dati di mercato fallito. Impossibile procedere.")
+        # Usciamo in modo sicuro restituendo None
+        return None, None, None, None, None, None
+
+    # Ricostruiamo il DataFrame con la stessa struttura di prima (MultiIndex)
+    market_data = pd.concat(market_data_dfs.values(), keys=market_data_dfs.keys(), axis=1)
+    market_data.columns = market_data.columns.swaplevel(0, 1)
+
+    # Il resto dello script da qui in poi non cambia e funzionerà come prima
+    cmi_data_dict = {}
     cmi_data_dict = {}
     try:
         for name, ticker in fred_series_cmi.items(): cmi_data_dict[name] = web.DataReader(ticker, 'fred', start_date, end_date)
