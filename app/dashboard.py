@@ -261,14 +261,20 @@ if __name__ == '__main__':
         if st.button("Avvia Backtest Storico Completo"):
             with st.spinner("Esecuzione completa della strategia in corso..."):
                 results = run_full_strategy(params_dict, start_date_input, datetime.date.today())
-                if results is not None:
+                if results is None or len(results) < 6 or results[5] is None:
+                    st.error("Esecuzione del backtest fallita. La funzione 'run_full_strategy' non ha restituito dati validi. Causa probabile: errore nel download o nell'elaborazione dei dati da yfinance o FRED. Riprovare tra poco.")
+                else:
+                    # Se siamo qui, i dati sono validi e possiamo procedere
                     equity_curves, strategy_returns, benchmark_returns, trades, stop_losses, df_final_results = results
                     st.success("Esecuzione completata con successo!")
                     
+                    # Ora questa chiamata è sicura perché avviene solo se df_final_results è valido
                     strategy_metrics, benchmark_metrics = calculate_metrics(strategy_returns, benchmark_returns, trades, stop_losses, df_final_results)
                     metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics})
                     
-                    st.subheader("Grafico Operazioni di Copertura"); st.plotly_chart(plotly_trades_chart(df_final_results, 'Prezzo SPY con Operazioni di Copertura (Backtest)'), use_container_width=True)
-                    st.subheader("Equity Line Storica"); st.line_chart(equity_curves)
-                    st.subheader("Metriche di Performance"); st.table(metrics_df)
-                else: st.error("Esecuzione del backtest fallita.")
+                    st.subheader("Grafico Operazioni di Copertura")
+                    st.plotly_chart(plotly_trades_chart(df_final_results, 'Prezzo ES con Operazioni di Copertura (Backtest)'), use_container_width=True)
+                    st.subheader("Equity Line Storica")
+                    st.line_chart(equity_curves)
+                    st.subheader("Metriche di Performance")
+                    st.table(metrics_df)
