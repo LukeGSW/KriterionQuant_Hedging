@@ -13,115 +13,88 @@ import datetime
 # ==============================================================================
 # FUNZIONE STRATEGIA (Logica 1:1 con il notebook)
 # ==============================================================================
+# SOSTITUISCI LA TUA VECCHIA FUNZIONE CON QUESTA VERSIONE COMPLETA E CORRETTA
+
 def run_full_strategy(params_dict, start_date, end_date):
-    
-    # Import necessari all'interno della funzione per chiarezza
     import pandas as pd
     import yfinance as yf
+    import numpy as np
     import requests
     from io import StringIO
     from scipy.stats import zscore
-    import streamlit as st # Necessario per st.error
+    import streamlit as st
+
+    # --- INIZIO FUNZIONE ---
     CAPITALE_INIZIALE = params_dict['capitale_iniziale']
-    # --- 1. DOWNLOAD DATI DI MERCATO (yfinance) ---
+    
     all_tickers = ['SPY', 'ES=F', '^VIX', '^VIX3M']
+    fred_series_cmi = {'TED_Spread': 'TEDRATE', 'Yield_Curve_10Y2Y': 'T10Y2Y', 'VIX': 'VIXCLS', 'High_Yield_Spread': 'BAMLH0A0HYM2'}
+
+    # Download yfinance
     market_data_dfs = {}
-    print("Avvio download dati di mercato ticker per ticker...")
     for ticker in all_tickers:
         try:
-            data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
+            data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False, no_cache=True)
             if not data.empty:
                 market_data_dfs[ticker] = data
-            else:
-                print(f"Attenzione: Nessun dato scaricato per {ticker}")
         except Exception as e:
-            st.error(f"ERRORE CRITICO nel download di {ticker} da yfinance: {e}")
+            st.error(f"ERRORE nel download di {ticker} da yfinance: {e}")
             return None, None, None, None, None, None
-
     if not market_data_dfs:
         st.error("Download di tutti i dati di mercato fallito.")
         return None, None, None, None, None, None
-
     market_data = pd.concat(market_data_dfs.values(), keys=market_data_dfs.keys(), axis=1)
     market_data.columns = market_data.columns.swaplevel(0, 1)
 
-    # --- 2. DOWNLOAD DATI MACRO (FRED API DIRETTA) ---
-    fred_series_cmi = {'TED_Spread': 'TEDRATE', 'Yield_Curve_10Y2Y': 'T10Y2Y', 'VIX': 'VIXCLS', 'High_Yield_Spread': 'BAMLH0A0HYM2'}
+    # Download FRED
     cmi_data_dict = {}
-    print("Avvio download dati FRED con chiamata API diretta...")
     try:
         fred_api_key = st.secrets["FRED_API_KEY"]
         for name, ticker in fred_series_cmi.items():
-            print(f"Scarico dati FRED per {ticker}...")
-            # Costruiamo l'URL per l'endpoint ufficiale delle API FRED
-            api_url = f"https://api.stlouisfed.org/fred/series/observations?series_id={ticker}&api_key={fred_api_key}&file_type=json&observation_start={start_date}"
-            
+            api_url = f"https://api.stlouisfed.org/fred/series/observations?series_id={ticker}&api_key={fred_api_key}&file_type=json&observation_start={start_date.strftime('%Y-%m-%d')}"
             response = requests.get(api_url, timeout=30)
-            response.raise_for_status() # Lancia errore se la richiesta fallisce
-            
+            response.raise_for_status()
             json_data = response.json()
             observations = json_data.get('observations', [])
-            
-            if not observations:
-                print(f"Attenzione: Nessuna osservazione per {ticker} da FRED.")
-                continue
-            
-            # Convertiamo il risultato JSON in un DataFrame pandas
-            temp_df = pd.DataFrame(observations)
-            temp_df = temp_df[['date', 'value']]
-            temp_df['date'] = pd.to_datetime(temp_df['date'])
-            temp_df.set_index('date', inplace=True)
-            temp_df['value'] = pd.to_numeric(temp_df['value'], errors='coerce') # Converte i '.' in NaN
-            
-            cmi_data_dict[name] = temp_df['value']
-
-    except KeyError:
-        st.error("ERRORE: Chiave API 'FRED_API_KEY' non trovata nei secrets di Streamlit.")
-        return None, None, None, None, None, None
+            if observations:
+                temp_df = pd.DataFrame(observations)[['date', 'value']]
+                temp_df['date'] = pd.to_datetime(temp_df['date'])
+                temp_df.set_index('date', inplace=True)
+                temp_df['value'] = pd.to_numeric(temp_df['value'], errors='coerce')
+                cmi_data_dict[name] = temp_df['value']
     except Exception as e:
-        st.error(f"Errore nella chiamata API diretta a FRED per {ticker}: {e}")
-        return None, None, None, None, None, None
-
-    if not cmi_data_dict:
-        st.error("Download di tutti i dati da FRED fallito.")
+        st.error(f"Errore nella chiamata API a FRED per {ticker}: {e}")
         return None, None, None, None, None, None
         
     cmi_data = pd.concat(cmi_data_dict.values(), axis=1)
     cmi_data.columns = cmi_data_dict.keys()
 
-    # --- 3. ELABORAZIONE E CALCOLO SEGNALI (Logica Invariata) ---
-    # Il resto della funzione da qui in poi è IDENTICO al tuo codice originale
-    
+    # Unione e pulizia dati
     df = pd.DataFrame()
     for ticker in all_tickers:
         prefix = ticker.replace('=F', '').replace('^', '')
         for col_type in ['Open', 'High', 'Low', 'Close', 'Volume']:
-            try:
-                df[f'{prefix}_{col_type}'] = market_data[(col_type, ticker)]
-            except KeyError:
-                pass
+            try: df[f'{prefix}_{col_type}'] = market_data[(col_type, ticker)]
+            except KeyError: pass
     df = df.join(cmi_data).ffill()
     
     colonne_essenziali = ['SPY_Open', 'SPY_Close', 'ES_Open', 'ES_Close', 'VIX_Close', 'VIX3M_Close']
     df.dropna(subset=colonne_essenziali, inplace=True)
 
+    # Calcolo indicatori e segnali
     cmi_cols = [col for col in fred_series_cmi.keys() if col in df.columns]
     cmi_data_clean = df[cmi_cols].dropna()
     cmi_data_zscore = cmi_data_clean.apply(zscore)
     if 'Yield_Curve_10Y2Y' in cmi_data_zscore.columns:
         cmi_data_zscore['Yield_Curve_10Y2Y'] *= -1
-        
     df['CMI_ZScore'] = cmi_data_zscore.mean(axis=1)
     df['CMI_MA'] = df['CMI_ZScore'].rolling(window=int(params_dict['cmi_ma_window'])).mean()
     df.dropna(subset=['CMI_MA'], inplace=True)
     
-    if df.empty:
-        return None, None, None, None, None, None
+    if df.empty: return None, None, None, None, None, None
 
-    # Applichiamo la correzione con .shift(1) per allineare temporalmente i dati
     df['Signal_CMI'] = np.where(df['CMI_ZScore'] > df['CMI_MA'], 1, 0)
     df['Signal_CMI'] = df['Signal_CMI'].shift(1)
-    
     df['VIX_Ratio'] = df['VIX_Close'] / df['VIX3M_Close']
     signal_vix = [0] * len(df)
     in_hedge_signal = False
@@ -136,37 +109,32 @@ def run_full_strategy(params_dict, start_date, end_date):
     df['Signal_VIX'] = signal_vix
     df['Signal_Count'] = df['Signal_CMI'].fillna(0) + df['Signal_VIX']
 
-    # ... E il resto della logica del backtest che segue rimane invariato ...
-    # (Ometto per brevità ma il tuo codice del backtest va qui)
+    # Backtest Loop
     initial_spy_price = df['SPY_Open'].iloc[0]
     spy_shares = CAPITALE_INIZIALE / initial_spy_price
     cash_from_hedging, es_contracts, hedge_entry_price, current_tranches = 0.0, 0, 0, 0
     portfolio_history = [{'Date': df.index[0], 'Portfolio_Value': CAPITALE_INIZIALE, 'MES_Contracts': 0}]
     hedge_trades_count, hedge_stopped_out, stop_loss_events = 0, False, 0
-    
-    # Aggiungiamo colonne per il calcolo del drawdown della copertura
     df['Hedge_PnL'] = 0.0
     df['Equity_at_Hedge_Entry'] = np.nan
 
     for i in range(len(df) - 1):
         target_tranches = df['Signal_Count'].iloc[i]
         row_T1 = df.iloc[i+1]
-        
-        realized_hedge_pnl_today = 0
-        unrealized_pnl_change = 0
+        realized_hedge_pnl_today, unrealized_pnl_change = 0, 0
         
         if current_tranches > 0:
-            unrealized_pnl_change = es_contracts * (row_T1['ES_Close'] - df.iloc[i]['ES_Close']) * params['micro_es_multiplier']
+            unrealized_pnl_change = es_contracts * (row_T1['ES_Close'] - df.iloc[i]['ES_Close']) * params_dict['micro_es_multiplier']
         
         if current_tranches > 0:
             if row_T1['ES_Open'] > hedge_entry_price * (1 + params_dict['stop_loss_threshold_hedge']):
-                realized_hedge_pnl_today = es_contracts * (row_T1['ES_Open'] - hedge_entry_price) * params['micro_es_multiplier']
+                realized_hedge_pnl_today = es_contracts * (row_T1['ES_Open'] - hedge_entry_price) * params_dict['micro_es_multiplier']
                 es_contracts, current_tranches, hedge_stopped_out = 0, 0, True
                 stop_loss_events += 1
             elif target_tranches < current_tranches:
                 contracts_per_tranche = es_contracts / current_tranches
                 contracts_to_close = contracts_per_tranche * (current_tranches - target_tranches)
-                realized_hedge_pnl_today = contracts_to_close * (row_T1['ES_Open'] - hedge_entry_price) * params['micro_es_multiplier']
+                realized_hedge_pnl_today = contracts_to_close * (row_T1['ES_Open'] - hedge_entry_price) * params_dict['micro_es_multiplier']
                 es_contracts -= contracts_to_close
                 current_tranches = target_tranches
 
@@ -175,10 +143,9 @@ def run_full_strategy(params_dict, start_date, end_date):
             tranches_to_add = target_tranches - current_tranches
             portfolio_value_at_entry = (spy_shares * row_T1['SPY_Open']) + cash_from_hedging
             notional_per_tranche = portfolio_value_at_entry * params_dict['hedge_percentage_per_tranche']
-            if current_tranches == 0: 
+            if current_tranches == 0:
                 hedge_entry_price = row_T1['ES_Open']
                 hedge_trades_count += 1
-                # Registra l'equity all'inizio del ciclo di copertura
                 df.loc[row_T1.name, 'Equity_at_Hedge_Entry'] = portfolio_value_at_entry
             contracts_to_add = - (notional_per_tranche / (row_T1['ES_Open'] * params_dict['micro_es_multiplier'])) * tranches_to_add
             es_contracts += contracts_to_add
@@ -186,11 +153,10 @@ def run_full_strategy(params_dict, start_date, end_date):
 
         cash_from_hedging += realized_hedge_pnl_today
         spy_position_value = spy_shares * row_T1['SPY_Close']
-        unrealized_hedge_pnl = es_contracts * (row_T1['ES_Close'] - hedge_entry_price) * params['micro_es_multiplier'] if current_tranches > 0 else 0
+        unrealized_hedge_pnl = es_contracts * (row_T1['ES_Close'] - hedge_entry_price) * params_dict['micro_es_multiplier'] if current_tranches > 0 else 0
         portfolio_value = spy_position_value + cash_from_hedging + unrealized_hedge_pnl
         
         daily_hedge_pnl = realized_hedge_pnl_today + unrealized_pnl_change
-        
         portfolio_history.append({'Date': row_T1.name, 'Portfolio_Value': portfolio_value, 'MES_Contracts': es_contracts})
         df.loc[row_T1.name, 'Hedge_PnL'] = daily_hedge_pnl
 
@@ -205,7 +171,6 @@ def run_full_strategy(params_dict, start_date, end_date):
     df_con_risultati = df.join(results_df_final[['MES_Contracts']]).ffill()
 
     return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count, stop_loss_events, df_con_risultati
-
 # ==============================================================================
 # FUNZIONI DI PLOTTING E METRICHE
 # ==============================================================================
