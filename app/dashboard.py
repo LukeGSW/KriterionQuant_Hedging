@@ -159,7 +159,7 @@ def run_full_strategy(params_dict, start_date, end_date):
             unrealized_pnl_change = es_contracts * (row_T1['ES_Close'] - df.iloc[i]['ES_Close']) * params['micro_es_multiplier']
         
         if current_tranches > 0:
-            if row_T1['ES_Open'] > hedge_entry_price * (1 + params['stop_loss_threshold_hedge']):
+            if row_T1['ES_Open'] > hedge_entry_price * (1 + params_dict['stop_loss_threshold_hedge']):
                 realized_hedge_pnl_today = es_contracts * (row_T1['ES_Open'] - hedge_entry_price) * params['micro_es_multiplier']
                 es_contracts, current_tranches, hedge_stopped_out = 0, 0, True
                 stop_loss_events += 1
@@ -174,13 +174,13 @@ def run_full_strategy(params_dict, start_date, end_date):
         if target_tranches > current_tranches and not hedge_stopped_out:
             tranches_to_add = target_tranches - current_tranches
             portfolio_value_at_entry = (spy_shares * row_T1['SPY_Open']) + cash_from_hedging
-            notional_per_tranche = portfolio_value_at_entry * params['hedge_percentage_per_tranche']
+            notional_per_tranche = portfolio_value_at_entry * params_dict['hedge_percentage_per_tranche']
             if current_tranches == 0: 
                 hedge_entry_price = row_T1['ES_Open']
                 hedge_trades_count += 1
                 # Registra l'equity all'inizio del ciclo di copertura
                 df.loc[row_T1.name, 'Equity_at_Hedge_Entry'] = portfolio_value_at_entry
-            contracts_to_add = - (notional_per_tranche / (row_T1['ES_Open'] * params['micro_es_multiplier'])) * tranches_to_add
+            contracts_to_add = - (notional_per_tranche / (row_T1['ES_Open'] * params_dict['micro_es_multiplier'])) * tranches_to_add
             es_contracts += contracts_to_add
             current_tranches = target_tranches
 
