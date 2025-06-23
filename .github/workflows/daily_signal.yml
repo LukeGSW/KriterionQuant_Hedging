@@ -49,4 +49,6 @@ jobs:
           echo "fred_series_cmi = { 'Yield_Curve_10Y2Y': 'T10Y2Y', 'VIX': 'VIXCLS', 'High_Yield_Spread': 'BAMLH0A0HYM2' }" >> config.ini
 
       - name: 5. Run the signal generation script
-        run: python bot_runner.py
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python bot_runner.py # o il nome del tuo script runner
