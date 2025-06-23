@@ -48,7 +48,6 @@ def run_full_strategy(params, start_date, end_date):
 
     # Il resto dello script da qui in poi non cambia e funzionerà come prima
     cmi_data_dict = {}
-    cmi_data_dict = {}
     try:
         for name, ticker in fred_series_cmi.items(): cmi_data_dict[name] = web.DataReader(ticker, 'fred', start_date, end_date)
         cmi_data = pd.concat(cmi_data_dict.values(), axis=1, sort=False).ffill()
