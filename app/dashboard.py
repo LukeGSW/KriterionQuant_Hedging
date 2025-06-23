@@ -300,7 +300,9 @@ if __name__ == '__main__':
                     # Ora questa chiamata è sicura perché avviene solo se df_final_results è valido
                     strategy_metrics, benchmark_metrics = calculate_metrics(strategy_returns, benchmark_returns, trades, stop_losses, df_final_results)
                     metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics})
-                    
+                    # --- NUOVA RIGA DA AGGIUNGERE ---
+                    # Converte tutte le colonne in tipo stringa per una visualizzazione sicura
+                    metrics_df = metrics_df.astype(str)
                     st.subheader("Grafico Operazioni di Copertura")
                     st.plotly_chart(plotly_trades_chart(df_final_results, 'Prezzo ES con Operazioni di Copertura (Backtest)'), use_container_width=True)
                     st.subheader("Equity Line Storica")
