@@ -34,7 +34,8 @@ def run_full_strategy(params_dict, start_date, end_date):
     market_data_dfs = {}
     for ticker in all_tickers:
         try:
-            data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False, no_cache=True)
+            data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
+
             if not data.empty:
                 market_data_dfs[ticker] = data
         except Exception as e:
