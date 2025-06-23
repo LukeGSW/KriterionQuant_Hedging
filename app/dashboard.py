@@ -49,13 +49,27 @@ def run_full_strategy(params, start_date, end_date):
     # Il resto dello script da qui in poi non cambia e funzionerà come prima
     cmi_data_dict = {}
     try:
-        for name, ticker in fred_series_cmi.items(): cmi_data_dict[name] = web.DataReader(ticker, 'fred', start_date, end_date)
-        cmi_data = pd.concat(cmi_data_dict.values(), axis=1, sort=False).ffill()
-        cmi_data.columns = fred_series_cmi.keys()
-        if 'TED_Spread' in cmi_data.columns and cmi_data['TED_Spread'].isnull().all(): cmi_data = cmi_data.drop(columns=['TED_Spread'])
+        # 1. Leggiamo la chiave API direttamente dai secrets di Streamlit
+        fred_api_key = st.secrets["FRED_API_KEY"]
+        
+        # 2. Usiamo la chiave in un ciclo for per ogni ticker FRED
+        for name, ticker in fred_series_cmi.items():
+            print(f"Scarico dati FRED per {ticker} usando la chiave API...")
+            cmi_data_dict[name] = web.DataReader(
+                ticker, 
+                'fred', 
+                start_date, 
+                end_date, 
+                api_key=fred_api_key  # <-- Passiamo esplicitamente la chiave qui
+            )
+    except KeyError:
+        # Questo errore si verifica se il secret non è stato impostato su Streamlit
+        st.error("ERRORE: Chiave API 'FRED_API_KEY' non trovata nei secrets di Streamlit. Assicurati di averla impostata correttamente nel pannello della tua app.")
+        return None, None, None, None, None, None # Uscita sicura
     except Exception as e:
-        st.error(f"Errore nel download dei dati da FRED: {e}"); return None, None, None, None, None, None
-
+        # Questo cattura altri errori, come una chiave non valida o problemi del server FRED
+        st.error(f"Errore nel download dei dati da FRED. Dettagli: {e}")
+        return None, None, None, None, None, None # Uscita sicura
     df = pd.DataFrame()
     for ticker in all_tickers:
         prefix = ticker.replace('=F', '').replace('^', '')
