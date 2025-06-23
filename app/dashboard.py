@@ -22,7 +22,7 @@ def run_full_strategy(params_dict, start_date, end_date):
     from io import StringIO
     from scipy.stats import zscore
     import streamlit as st # Necessario per st.error
-
+CAPITALE_INIZIALE = params_dict['capitale_iniziale']
     # --- 1. DOWNLOAD DATI DI MERCATO (yfinance) ---
     all_tickers = ['SPY', 'ES=F', '^VIX', '^VIX3M']
     market_data_dfs = {}
