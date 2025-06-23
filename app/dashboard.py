@@ -237,7 +237,7 @@ if __name__ == '__main__':
                 end_date = datetime.date.today()
                 start_date_recent = end_date - datetime.timedelta(days=2*365)
                 results = run_full_strategy(params_dict, start_date_recent, end_date)
-                if results is not None:
+                if results is not None and results[5] is not None:
                     _, _, _, _, _, df_results = results
                     if not df_results.empty:
                         df_last_year = df_results.last('365D')
@@ -251,8 +251,10 @@ if __name__ == '__main__':
                         st.line_chart(vix_plot_df, color=["#FF00FF", "#808080", "#808080"])
                         st.line_chart(df_last_year[['CMI_ZScore', 'CMI_MA']])
                         st.plotly_chart(plotly_individual_signals_chart(df_last_year), use_container_width=True)
-                    else: st.warning("Nessun segnale calcolabile per il periodo recente.")
-                else: st.error("Impossibile calcolare il segnale odierno.")
+                    else:
+                        st.warning("Il calcolo ha prodotto un set di dati vuoto. Nessun segnale da mostrare.")
+                else:
+                    st.error("La funzione di calcolo non ha restituito risultati. Causa probabile: errore nel download dei dati iniziali. Riprova tra poco.")
     
     with tab2:
         st.header("Esegui un backtest completo sulla base dei parametri della sidebar")
