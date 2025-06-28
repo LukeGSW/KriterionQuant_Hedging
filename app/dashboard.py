@@ -9,6 +9,7 @@ import configparser
 from scipy.stats import zscore
 import plotly.graph_objects as go
 import datetime
+import os
 
 # ==============================================================================
 # FUNZIONE STRATEGIA (Logica 1:1 con il notebook)
@@ -50,11 +51,16 @@ def run_full_strategy(params_dict, start_date, end_date):
     # Download FRED
     cmi_data_dict = {}
     try:
-        fred_api_key = st.secrets["FRED_API_KEY"]
+        # Tenta di ottenere la chiave API dall'ambiente (per GitHub Actions)
+        # Se non la trova, la cerca nei secrets di Streamlit (per la dashboard)
+        fred_api_key = os.environ.get("FRED_API_KEY")
+        if not fred_api_key:
+            fred_api_key = st.secrets["FRED_API_KEY"]
+    
         for name, ticker in fred_series_cmi.items():
             api_url = f"https://api.stlouisfed.org/fred/series/observations?series_id={ticker}&api_key={fred_api_key}&file_type=json&observation_start={start_date.strftime('%Y-%m-%d')}"
             response = requests.get(api_url, timeout=30)
-            response.raise_for_status()
+            response.raise_for_status() # Solleva un errore se la richiesta fallisce
             json_data = response.json()
             observations = json_data.get('observations', [])
             if observations:
@@ -63,8 +69,13 @@ def run_full_strategy(params_dict, start_date, end_date):
                 temp_df.set_index('date', inplace=True)
                 temp_df['value'] = pd.to_numeric(temp_df['value'], errors='coerce')
                 cmi_data_dict[name] = temp_df['value']
+    except KeyError:
+        # Questo errore scatta se non trova la chiave neanche in st.secrets
+        st.error("ERRORE: FRED_API_KEY non trovata. Impostala nelle variabili d'ambiente o nei secrets di Streamlit.")
+        return None, None, None, None, None, None
     except Exception as e:
-        st.error(f"Errore nella chiamata API a FRED per {ticker}: {e}")
+        # Gestisce altri errori (es. rete, API FRED non disponibile)
+        st.error(f"Errore nella chiamata API a FRED per {locals().get('ticker', 'N/A')}: {e}")
         return None, None, None, None, None, None
         
     cmi_data = pd.concat(cmi_data_dict.values(), axis=1)
