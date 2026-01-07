@@ -1,58 +1,143 @@
 # app/dashboard.py
-# VERSIONE FINALE E DEFINITIVA. Calcolo Max DD Coperture corretto.
+# VERSIONE FINALE: Implementazione Ibrida EODHD + Yahoo Finance (Fallback)
 import streamlit as st
 import pandas as pd
-import yfinance as yf
-import pandas_datareader.data as web
 import numpy as np
 import configparser
 from scipy.stats import zscore
 import plotly.graph_objects as go
 import datetime
 import os
+import requests
+import yfinance as yf
+from io import StringIO
 
 # ==============================================================================
-# FUNZIONE STRATEGIA (Logica 1:1 con il notebook)
+# CONFIGURAZIONE EODHD / YAHOO
 # ==============================================================================
-# SOSTITUISCI LA TUA VECCHIA FUNZIONE CON QUESTA VERSIONE COMPLETA E CORRETTA
+
+# Mapping: Ticker Yahoo (usati nel config) -> Ticker EODHD
+TICKER_MAPPING_EODHD = {
+    'SPY': 'SPY.US',
+    'ES=F': 'ES.CME',      # Controlla se hai accesso ai dati CME
+    '^VIX': 'VIX.INDX',
+    '^VIX3M': 'VIX3M.INDX'
+}
+
+def fetch_hybrid_data(ticker_yahoo, api_key, start_date, end_date):
+    """
+    Tenta il download da EODHD. Se fallisce o manca la licenza,
+    fa fallback automatico su Yahoo Finance.
+    """
+    eodhd_symbol = TICKER_MAPPING_EODHD.get(ticker_yahoo, ticker_yahoo)
+    data_eodhd = pd.DataFrame()
+    source_used = "N/A"
+    
+    # 1. TENTATIVO EODHD
+    if api_key:
+        try:
+            fmt = '%Y-%m-%d'
+            start_str = start_date.strftime(fmt) if isinstance(start_date, (datetime.date, datetime.datetime)) else start_date
+            end_str = end_date.strftime(fmt) if isinstance(end_date, (datetime.date, datetime.datetime)) else end_date
+            
+            url = f'https://eodhd.com/api/eod/{eodhd_symbol}'
+            params = {'api_token': api_key, 'fmt': 'json', 'from': start_str, 'to': end_str, 'period': 'd'}
+            
+            r = requests.get(url, params=params, timeout=5)
+            if r.status_code == 200:
+                json_data = r.json()
+                if json_data and isinstance(json_data, list) and len(json_data) > 0:
+                    df = pd.DataFrame(json_data)
+                    # Normalizzazione colonne
+                    df = df.rename(columns={'date': 'Date', 'open': 'Open', 'high': 'High', 
+                                          'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
+                    df['Date'] = pd.to_datetime(df['Date'])
+                    df.set_index('Date', inplace=True)
+                    
+                    # Selezione e conversione
+                    if not df.empty:
+                        cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+                        for c in cols:
+                            if c in df.columns: 
+                                df[c] = pd.to_numeric(df[c], errors='coerce')
+                        
+                        data_eodhd = df[cols]
+                        source_used = "EODHD"
+        except Exception:
+            pass # Fallback silenzioso
+
+    # 2. TENTATIVO YAHOO (FALLBACK)
+    if data_eodhd.empty:
+        try:
+            df_yf = yf.download(ticker_yahoo, start=start_date, end=end_date, progress=False, auto_adjust=False)
+            if not df_yf.empty:
+                # Gestione MultiIndex di yfinance
+                if isinstance(df_yf.columns, pd.MultiIndex):
+                     try:
+                        df_yf = df_yf.xs(ticker_yahoo, axis=1, level=1, drop_level=True)
+                     except KeyError:
+                        pass # Potrebbe non essere necessario se il ticker è uno solo
+                
+                data_eodhd = df_yf[['Open', 'High', 'Low', 'Close', 'Volume']]
+                source_used = "Yahoo (Fallback)"
+        except Exception as e:
+            st.error(f"Errore download fallback ({ticker_yahoo}): {e}")
+
+    return data_eodhd, source_used
+
+# ==============================================================================
+# FUNZIONE STRATEGIA (CORE)
+# ==============================================================================
 
 def run_full_strategy(params_dict, start_date, end_date):
-    import pandas as pd
-    import yfinance as yf
-    import numpy as np
-    import requests
-    from io import StringIO
-    from scipy.stats import zscore
-    import streamlit as st
-
-    # --- INIZIO FUNZIONE ---
-    CAPITALE_INIZIALE = params_dict['capitale_iniziale']
-    
-    all_tickers = ['SPY', 'ES=F', '^VIX', '^VIX3M']
-    fred_series_cmi = {'TED_Spread': 'TEDRATE', 'Yield_Curve_10Y2Y': 'T10Y2Y', 'VIX': 'VIXCLS', 'High_Yield_Spread': 'BAMLH0A0HYM2'}
-
-    # Download yfinance
-    market_data_dfs = {}
-    for ticker in all_tickers:
+    # Recupero API KEY EODHD
+    eodhd_api_key = os.environ.get("EODHD_API_KEY")
+    if not eodhd_api_key:
         try:
-            data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
+            eodhd_api_key = st.secrets["EODHD_API_KEY"]
+        except Exception:
+            eodhd_api_key = None
 
-            if not data.empty:
-                market_data_dfs[ticker] = data
-        except Exception as e:
-            st.error(f"ERRORE nel download di {ticker} da yfinance: {e}")
-            return None, None, None, None, None, None
+    CAPITALE_INIZIALE = params_dict['capitale_iniziale']
+    all_tickers = ['SPY', 'ES=F', '^VIX', '^VIX3M']
+    fred_series_cmi = {'TED_Spread': 'TEDRATE', 'Yield_Curve_10Y2Y': 'T10Y2Y', 
+                       'VIX': 'VIXCLS', 'High_Yield_Spread': 'BAMLH0A0HYM2'}
+
+    # --- 1. DOWNLOAD DATI MERCATO ---
+    market_data_dfs = {}
+    
+    # Barra di progresso (solo se in Streamlit context)
+    try:
+        my_bar = st.progress(0, text="Download dati in corso...")
+    except:
+        my_bar = None
+
+    for idx, ticker in enumerate(all_tickers):
+        data, source = fetch_hybrid_data(ticker, eodhd_api_key, start_date, end_date)
+        if not data.empty:
+            market_data_dfs[ticker] = data
+        if my_bar: 
+            my_bar.progress((idx + 1) / len(all_tickers), text=f"Scaricato {ticker} da {source}")
+            
+    if my_bar: my_bar.empty()
+
     if not market_data_dfs:
-        st.error("Download di tutti i dati di mercato fallito.")
+        st.error("Download dati fallito.")
         return None, None, None, None, None, None
-    market_data = pd.concat(market_data_dfs.values(), keys=market_data_dfs.keys(), axis=1)
-    market_data.columns = market_data.columns.swaplevel(0, 1)
 
-    # Download FRED
+    # Unione dataframe
+    df = pd.DataFrame()
+    for ticker in all_tickers:
+        if ticker in market_data_dfs:
+            data = market_data_dfs[ticker]
+            prefix = ticker.replace('=F', '').replace('^', '')
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                if col in data.columns:
+                    df[f'{prefix}_{col}'] = data[col]
+
+    # --- 2. DOWNLOAD DATI MACRO (FRED) ---
     cmi_data_dict = {}
     try:
-        # Tenta di ottenere la chiave API dall'ambiente (per GitHub Actions)
-        # Se non la trova, la cerca nei secrets di Streamlit (per la dashboard)
         fred_api_key = os.environ.get("FRED_API_KEY")
         if not fred_api_key:
             fred_api_key = st.secrets["FRED_API_KEY"]
@@ -60,45 +145,44 @@ def run_full_strategy(params_dict, start_date, end_date):
         for name, ticker in fred_series_cmi.items():
             api_url = f"https://api.stlouisfed.org/fred/series/observations?series_id={ticker}&api_key={fred_api_key}&file_type=json&observation_start={start_date.strftime('%Y-%m-%d')}"
             response = requests.get(api_url, timeout=30)
-            response.raise_for_status() # Solleva un errore se la richiesta fallisce
-            json_data = response.json()
-            observations = json_data.get('observations', [])
-            if observations:
-                temp_df = pd.DataFrame(observations)[['date', 'value']]
-                temp_df['date'] = pd.to_datetime(temp_df['date'])
-                temp_df.set_index('date', inplace=True)
-                temp_df['value'] = pd.to_numeric(temp_df['value'], errors='coerce')
-                cmi_data_dict[name] = temp_df['value']
-    except KeyError:
-        # Questo errore scatta se non trova la chiave neanche in st.secrets
-        st.error("ERRORE: FRED_API_KEY non trovata. Impostala nelle variabili d'ambiente o nei secrets di Streamlit.")
-        return None, None, None, None, None, None
-    except Exception as e:
-        # Gestisce altri errori (es. rete, API FRED non disponibile)
-        st.error(f"Errore nella chiamata API a FRED per {locals().get('ticker', 'N/A')}: {e}")
+            if response.status_code == 200:
+                obs = response.json().get('observations', [])
+                if obs:
+                    temp_df = pd.DataFrame(obs)[['date', 'value']]
+                    temp_df['date'] = pd.to_datetime(temp_df['date'])
+                    temp_df.set_index('date', inplace=True)
+                    temp_df['value'] = pd.to_numeric(temp_df['value'], errors='coerce')
+                    cmi_data_dict[name] = temp_df['value']
+    except Exception:
+        pass # FRED è opzionale o gestito dopo
+        
+    cmi_data = pd.concat(cmi_data_dict.values(), axis=1) if cmi_data_dict else pd.DataFrame()
+    if not cmi_data.empty:
+        cmi_data.columns = cmi_data_dict.keys()
+        df = df.join(cmi_data).ffill()
+    else:
+        df = df.ffill()
+    
+    # Verifica colonne essenziali
+    colonne_essenziali = ['SPY_Open', 'SPY_Close', 'ES_Open', 'ES_Close', 'VIX_Close', 'VIX3M_Close']
+    if not all(col in df.columns for col in colonne_essenziali):
+        # Fallback critico: prova a usare SPY per ES se ES manca (approssimazione)
+        if 'ES_Close' not in df.columns and 'SPY_Close' in df.columns:
+            df['ES_Close'] = df['SPY_Close']
+            df['ES_Open'] = df['SPY_Open']
+        else:
+            df.dropna(subset=[c for c in colonne_essenziali if c in df.columns], inplace=True)
+
+    # --- 3. CALCOLO INDICATORI ---
+    cmi_cols = [col for col in fred_series_cmi.keys() if col in df.columns]
+    if not cmi_cols:
         return None, None, None, None, None, None
         
-    cmi_data = pd.concat(cmi_data_dict.values(), axis=1)
-    cmi_data.columns = cmi_data_dict.keys()
-
-    # Unione e pulizia dati
-    df = pd.DataFrame()
-    for ticker in all_tickers:
-        prefix = ticker.replace('=F', '').replace('^', '')
-        for col_type in ['Open', 'High', 'Low', 'Close', 'Volume']:
-            try: df[f'{prefix}_{col_type}'] = market_data[(col_type, ticker)]
-            except KeyError: pass
-    df = df.join(cmi_data).ffill()
-    
-    colonne_essenziali = ['SPY_Open', 'SPY_Close', 'ES_Open', 'ES_Close', 'VIX_Close', 'VIX3M_Close']
-    df.dropna(subset=colonne_essenziali, inplace=True)
-
-    # Calcolo indicatori e segnali
-    cmi_cols = [col for col in fred_series_cmi.keys() if col in df.columns]
     cmi_data_clean = df[cmi_cols].dropna()
     cmi_data_zscore = cmi_data_clean.apply(zscore)
     if 'Yield_Curve_10Y2Y' in cmi_data_zscore.columns:
         cmi_data_zscore['Yield_Curve_10Y2Y'] *= -1
+        
     df['CMI_ZScore'] = cmi_data_zscore.mean(axis=1)
     df['CMI_MA'] = df['CMI_ZScore'].rolling(window=int(params_dict['cmi_ma_window'])).mean()
     df.dropna(subset=['CMI_MA'], inplace=True)
@@ -107,21 +191,26 @@ def run_full_strategy(params_dict, start_date, end_date):
 
     df['Signal_CMI'] = np.where(df['CMI_ZScore'] > df['CMI_MA'], 1, 0)
     df['Signal_CMI'] = df['Signal_CMI'].shift(1)
-    df['VIX_Ratio'] = df['VIX_Close'] / df['VIX3M_Close']
+    
+    # VIX Ratio con gestione divisione per zero
+    df['VIX_Ratio'] = df['VIX_Close'] / df['VIX3M_Close'].replace(0, np.nan)
+    
     signal_vix = [0] * len(df)
     in_hedge_signal = False
     for i in range(len(df)):
         ratio = df['VIX_Ratio'].iloc[i]
+        if pd.isna(ratio): continue
         if ratio > params_dict['vix_ratio_upper_threshold']:
             in_hedge_signal = True
         elif ratio < params_dict['vix_ratio_lower_threshold']:
             in_hedge_signal = False
         if in_hedge_signal:
             signal_vix[i] = 1
+            
     df['Signal_VIX'] = signal_vix
     df['Signal_Count'] = df['Signal_CMI'].fillna(0) + df['Signal_VIX']
 
-    # Backtest Loop
+    # --- 4. BACKTEST LOOP ---
     initial_spy_price = df['SPY_Open'].iloc[0]
     spy_shares = CAPITALE_INIZIALE / initial_spy_price
     cash_from_hedging, es_contracts, hedge_entry_price, current_tranches = 0.0, 0, 0, 0
@@ -159,6 +248,7 @@ def run_full_strategy(params_dict, start_date, end_date):
                 hedge_entry_price = row_T1['ES_Open']
                 hedge_trades_count += 1
                 df.loc[row_T1.name, 'Equity_at_Hedge_Entry'] = portfolio_value_at_entry
+            
             contracts_to_add = - (notional_per_tranche / (row_T1['ES_Open'] * params_dict['micro_es_multiplier'])) * tranches_to_add
             es_contracts += contracts_to_add
             current_tranches = target_tranches
@@ -183,58 +273,88 @@ def run_full_strategy(params_dict, start_date, end_date):
     df_con_risultati = df.join(results_df_final[['MES_Contracts']]).ffill()
 
     return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count, stop_loss_events, df_con_risultati
+
 # ==============================================================================
 # FUNZIONI DI PLOTTING E METRICHE
 # ==============================================================================
 def calculate_metrics(strategy_returns, benchmark_returns, total_trades, stop_loss_events, results_df, trading_days=252):
     
-    # Calcolo Max Drawdown Coperture relativo all'equity all'apertura del trade
+    # Calcolo Max DD Coperture
     results_df['Hedge_Cycle_Equity'] = results_df['Equity_at_Hedge_Entry'].ffill()
     results_df['Cumulative_Hedge_PnL_per_Cycle'] = results_df.groupby(results_df['Equity_at_Hedge_Entry'].notna().cumsum())['Hedge_PnL'].cumsum()
     results_df['Hedge_DD_pct_on_Entry_Equity'] = results_df['Cumulative_Hedge_PnL_per_Cycle'] / results_df['Hedge_Cycle_Equity']
     max_drawdown_hedge_pct = results_df['Hedge_DD_pct_on_Entry_Equity'].min()
     
-    # Calcolo metriche standard
+    # Metriche Strategy
     metrics = {
         "Numero di Trade di Copertura": total_trades,
         "Numero di Stop Loss": stop_loss_events,
         "Max DD Coperture su Equity Iniziale Trade": f"{max_drawdown_hedge_pct:.2%}" if pd.notna(max_drawdown_hedge_pct) else "N/A"
     }
     
-    cumulative_returns = (1 + strategy_returns).cumprod(); total_return = cumulative_returns.iloc[-1] - 1
+    cumulative_returns = (1 + strategy_returns).cumprod()
+    total_return = cumulative_returns.iloc[-1] - 1
     num_years = len(strategy_returns) / trading_days if len(strategy_returns) > 0 else 0
-    cagr = (cumulative_returns.iloc[-1]) ** (1/num_years) - 1 if num_years > 0 else 0; volatility = strategy_returns.std() * np.sqrt(trading_days)
-    sharpe_ratio = cagr / volatility if volatility > 0.0001 else 0; cumulative_max = cumulative_returns.cummax()
-    drawdown = (cumulative_returns - cumulative_max) / cumulative_max; max_drawdown = drawdown.min()
+    cagr = (cumulative_returns.iloc[-1]) ** (1/num_years) - 1 if num_years > 0 else 0
+    volatility = strategy_returns.std() * np.sqrt(trading_days)
+    sharpe_ratio = cagr / volatility if volatility > 0.0001 else 0
+    cumulative_max = cumulative_returns.cummax()
+    drawdown = (cumulative_returns - cumulative_max) / cumulative_max
+    max_drawdown = drawdown.min()
     calmar_ratio = cagr / abs(max_drawdown) if max_drawdown != 0 else 0
-    metrics.update({"Rendimento Totale": f"{total_return:.2%}", "CAGR (ann.)": f"{cagr:.2%}", "Volatilità (ann.)": f"{volatility:.2%}", "Sharpe Ratio": f"{sharpe_ratio:.2f}", "Max Drawdown": f"{max_drawdown:.2%}", "Calmar Ratio": f"{calmar_ratio:.2f}"})
     
-    # Calcolo metriche benchmark
+    metrics.update({
+        "Rendimento Totale": f"{total_return:.2%}", 
+        "CAGR (ann.)": f"{cagr:.2%}", 
+        "Volatilità (ann.)": f"{volatility:.2%}", 
+        "Sharpe Ratio": f"{sharpe_ratio:.2f}", 
+        "Max Drawdown": f"{max_drawdown:.2%}", 
+        "Calmar Ratio": f"{calmar_ratio:.2f}"
+    })
+    
+    # Metriche Benchmark
     bench_metrics = {}
-    bench_cumulative = (1 + benchmark_returns).cumprod(); bench_total_return = bench_cumulative.iloc[-1] - 1
+    bench_cumulative = (1 + benchmark_returns).cumprod()
+    bench_total_return = bench_cumulative.iloc[-1] - 1
     bench_num_years = len(benchmark_returns) / trading_days if len(benchmark_returns) > 0 else 0
     bench_cagr = (bench_cumulative.iloc[-1]) ** (1/bench_num_years) - 1 if bench_num_years > 0 else 0
     bench_volatility = benchmark_returns.std() * np.sqrt(trading_days)
     bench_sharpe = bench_cagr / bench_volatility if bench_volatility > 0.0001 else 0
-    bench_cummax = bench_cumulative.cummax(); bench_drawdown_series = (bench_cumulative - bench_cummax) / bench_cummax; bench_max_dd = bench_drawdown_series.min()
+    bench_cummax = bench_cumulative.cummax()
+    bench_drawdown_series = (bench_cumulative - bench_cummax) / bench_cummax
+    bench_max_dd = bench_drawdown_series.min()
     bench_calmar = bench_cagr / abs(bench_max_dd) if bench_max_dd != 0 else 0
-    bench_metrics.update({"Rendimento Totale": f"{bench_total_return:.2%}", "CAGR (ann.)": f"{bench_cagr:.2%}", "Volatilità (ann.)": f"{bench_volatility:.2%}", "Sharpe Ratio": f"{bench_sharpe:.2f}", "Max Drawdown": f"{bench_max_dd:.2%}", "Calmar Ratio": f"{bench_calmar:.2f}", "Numero di Trade di Copertura": 0, "Numero di Stop Loss": 0, "Max DD Coperture su Equity Iniziale Trade": "N/A"})
+    
+    bench_metrics.update({
+        "Rendimento Totale": f"{bench_total_return:.2%}", 
+        "CAGR (ann.)": f"{bench_cagr:.2%}", 
+        "Volatilità (ann.)": f"{bench_volatility:.2%}", 
+        "Sharpe Ratio": f"{bench_sharpe:.2f}", 
+        "Max Drawdown": f"{bench_max_dd:.2%}", 
+        "Calmar Ratio": f"{bench_calmar:.2f}", 
+        "Numero di Trade di Copertura": 0, 
+        "Numero di Stop Loss": 0, 
+        "Max DD Coperture su Equity Iniziale Trade": "N/A"
+    })
     
     return metrics, bench_metrics
 
 def plotly_trades_chart(df_results, title):
-    # ... (invariata)
-    trade_points = df_results[df_results['MES_Contracts'].diff() != 0].copy(); fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df_results.index, y=df_results['ES_Close'], mode='lines', name='Prezzo SPY', line=dict(color='cyan', width=1)))
-    aumento_copertura = trade_points[trade_points['MES_Contracts'] < trade_points['MES_Contracts'].shift(1).fillna(0)]; riduzione_copertura = trade_points[trade_points['MES_Contracts'] > trade_points['MES_Contracts'].shift(1).fillna(0)]
+    trade_points = df_results[df_results['MES_Contracts'].diff() != 0].copy()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df_results.index, y=df_results['ES_Close'], mode='lines', name='Prezzo SPY/ES', line=dict(color='cyan', width=1)))
+    
+    aumento_copertura = trade_points[trade_points['MES_Contracts'] < trade_points['MES_Contracts'].shift(1).fillna(0)]
+    riduzione_copertura = trade_points[trade_points['MES_Contracts'] > trade_points['MES_Contracts'].shift(1).fillna(0)]
+    
     fig.add_trace(go.Scatter(x=aumento_copertura.index, y=aumento_copertura['ES_Close'], mode='markers', name='Aumento Copertura', marker=dict(color='red', symbol='triangle-down', size=10)))
     fig.add_trace(go.Scatter(x=riduzione_copertura.index, y=riduzione_copertura['ES_Close'], mode='markers', name='Riduzione Copertura', marker=dict(color='lime', symbol='triangle-up', size=10)))
+    
     for _, row in trade_points.iterrows():
         fig.add_annotation(x=row.name, y=row['SPY_Close'], text=f"<b>{int(row['MES_Contracts'])}</b>", showarrow=False, yshift=15, font=dict(color="white", size=10), bgcolor="rgba(0,0,0,0.5)")
+    
     fig.update_layout(title=title, template='plotly_dark', yaxis_type="log", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     return fig
-
-# Dentro la funzione plotly_individual_signals_chart in app/dashboard.py
 
 def plotly_individual_signals_chart(df_results):
     df = df_results.copy()
@@ -242,7 +362,6 @@ def plotly_individual_signals_chart(df_results):
     vix_trades = df[df['Signal_VIX'].diff() != 0]
     fig = go.Figure()
     
-    # --- MODIFICA QUESTA RIGA ---
     fig.add_trace(go.Scatter(x=df.index, y=df['ES_Close'], mode='lines', name='Prezzo ES', line=dict(color='cyan', width=1)))
 
     cmi_entries = cmi_trades[cmi_trades['Signal_CMI'] == 1]
@@ -250,14 +369,14 @@ def plotly_individual_signals_chart(df_results):
     vix_entries = vix_trades[vix_trades['Signal_VIX'] == 1]
     vix_exits = vix_trades[vix_trades['Signal_VIX'] == 0]
 
-    # --- E LE SUCCESSIVE QUATTRO RIGHE ---
-    fig.add_trace(go.Scatter(x=cmi_entries.index, y=cmi_entries['ES_Close'], mode='markers', name='Entrata CMI', marker=dict(color='orange', symbol='triangle-down', size=12, line=dict(width=1, color='black'))))
-    fig.add_trace(go.Scatter(x=cmi_exits.index, y=cmi_exits['ES_Close'], mode='markers', name='Uscita CMI', marker=dict(color='orange', symbol='triangle-up', size=12, line=dict(width=1, color='black'))))
+    fig.add_trace(go.Scatter(x=cmi_entries.index, y=cmi_entries['ES_Close'], mode='markers', name='Entrata CMI', marker=dict(color='orange', symbol='triangle-down', size=12)))
+    fig.add_trace(go.Scatter(x=cmi_exits.index, y=cmi_exits['ES_Close'], mode='markers', name='Uscita CMI', marker=dict(color='orange', symbol='triangle-up', size=12)))
     fig.add_trace(go.Scatter(x=vix_entries.index, y=vix_entries['ES_Close'], mode='markers', name='Entrata VIX', marker=dict(color='magenta', symbol='cross', size=9)))
     fig.add_trace(go.Scatter(x=vix_exits.index, y=vix_exits['ES_Close'], mode='markers', name='Uscita VIX', marker=dict(color='magenta', symbol='x', size=9)))
     
     fig.update_layout(title='Prezzo ES con Segnali Individuali', template='plotly_dark', yaxis_type="log", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     return fig
+
 # ==============================================================================
 # INTERFACCIA STREAMLIT
 # ==============================================================================
@@ -265,7 +384,8 @@ if __name__ == '__main__':
     st.set_page_config(page_title="Kriterion Quant - Dashboard", page_icon="🔱", layout="wide")
     st.title("🔱 Dashboard Strategia di Copertura")
     
-    config = configparser.ConfigParser(); config.read('config.ini')
+    config = configparser.ConfigParser()
+    config.read('config.ini')
     default_params = dict(config['STRATEGY_PARAMS'])
     for key, value in default_params.items():
         try: default_params[key] = float(value)
@@ -278,7 +398,9 @@ if __name__ == '__main__':
     stop_loss_input = st.sidebar.slider("Stop Loss sulla Copertura (%)", min_value=0.01, max_value=0.20, value=default_params['stop_loss_threshold_hedge'], step=0.01, format="%.2f")
     
     params_dict = default_params.copy()
-    params_dict['capitale_iniziale'] = capital_input; params_dict['hedge_percentage_per_tranche'] = hedge_perc_input; params_dict['stop_loss_threshold_hedge'] = stop_loss_input
+    params_dict['capitale_iniziale'] = capital_input
+    params_dict['hedge_percentage_per_tranche'] = hedge_perc_input
+    params_dict['stop_loss_threshold_hedge'] = stop_loss_input
     
     tab1, tab2 = st.tabs(["📊 Segnale Odierno", "📜 Backtest Storico"])
     
@@ -295,7 +417,9 @@ if __name__ == '__main__':
                         df_last_year = df_results.last('365D')
                         latest_signal_row = df_results.iloc[-1]
                         st.subheader(f"Segnale per il {latest_signal_row.name.strftime('%Y-%m-%d')}")
-                        col1, col2, col3 = st.columns(3); col1.metric("Segnale CMI", int(latest_signal_row['Signal_CMI'])); col2.metric("Segnale VIX Ratio", int(latest_signal_row['Signal_VIX']))
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Segnale CMI", int(latest_signal_row['Signal_CMI']))
+                        col2.metric("Segnale VIX Ratio", int(latest_signal_row['Signal_VIX']))
                         col3.metric("Tranche di Copertura", int(latest_signal_row['Signal_Count']))
                         st.markdown("---")
                         st.subheader("Grafici Indicatori (ultimo anno)")
@@ -304,31 +428,25 @@ if __name__ == '__main__':
                         st.line_chart(df_last_year[['CMI_ZScore', 'CMI_MA']])
                         st.plotly_chart(plotly_individual_signals_chart(df_last_year), use_container_width=True)
                     else:
-                        st.warning("Il calcolo ha prodotto un set di dati vuoto. Nessun segnale da mostrare.")
+                        st.warning("Il calcolo ha prodotto un set di dati vuoto.")
                 else:
-                    st.error("La funzione di calcolo non ha restituito risultati. Causa probabile: errore nel download dei dati iniziali. Riprova tra poco.")
+                    st.error("Errore download dati.")
     
     with tab2:
-        st.header("Esegui un backtest completo sulla base dei parametri della sidebar")
+        st.header("Esegui un backtest completo")
         if st.button("Avvia Backtest Storico Completo"):
-            with st.spinner("Esecuzione completa della strategia in corso..."):
+            with st.spinner("Esecuzione strategia..."):
                 results = run_full_strategy(params_dict, start_date_input, datetime.date.today())
                 if results is None or len(results) < 6 or results[5] is None:
-                    st.error("Esecuzione del backtest fallita. La funzione 'run_full_strategy' non ha restituito dati validi. Causa probabile: errore nel download o nell'elaborazione dei dati da yfinance o FRED. Riprovare tra poco.")
+                    st.error("Backtest fallito. Errore nel download o elaborazione dati.")
                 else:
-                    # Se siamo qui, i dati sono validi e possiamo procedere
                     equity_curves, strategy_returns, benchmark_returns, trades, stop_losses, df_final_results = results
-                    st.success("Esecuzione completata con successo!")
-                    
-                    # Ora questa chiamata è sicura perché avviene solo se df_final_results è valido
+                    st.success("Esecuzione completata!")
                     strategy_metrics, benchmark_metrics = calculate_metrics(strategy_returns, benchmark_returns, trades, stop_losses, df_final_results)
-                    metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics})
-                    # --- NUOVA RIGA DA AGGIUNGERE ---
-                    # Converte tutte le colonne in tipo stringa per una visualizzazione sicura
-                    metrics_df = metrics_df.astype(str)
-                    st.subheader("Grafico Operazioni di Copertura")
-                    st.plotly_chart(plotly_trades_chart(df_final_results, 'Prezzo ES con Operazioni di Copertura (Backtest)'), use_container_width=True)
-                    st.subheader("Equity Line Storica")
+                    metrics_df = pd.DataFrame({'Strategia': strategy_metrics, 'Benchmark (SPY)': benchmark_metrics}).astype(str)
+                    st.subheader("Grafico Operazioni")
+                    st.plotly_chart(plotly_trades_chart(df_final_results, 'Backtest'), use_container_width=True)
+                    st.subheader("Equity Line")
                     st.line_chart(equity_curves)
-                    st.subheader("Metriche di Performance")
+                    st.subheader("Metriche")
                     st.table(metrics_df)
