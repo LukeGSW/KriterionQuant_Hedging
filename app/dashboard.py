@@ -1,5 +1,5 @@
 # app/dashboard.py
-# VERSIONE FINALE: Implementazione Ibrida EODHD + Yahoo Finance (Fallback)
+# VERSIONE FINALE SINCRONIZZATA: Logic-Consistent (Signal-on-Close) + Stop Loss 5% + Plotting Fix
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -86,7 +86,7 @@ def fetch_hybrid_data(ticker_yahoo, api_key, start_date, end_date):
     return data_eodhd, source_used
 
 # ==============================================================================
-# FUNZIONE STRATEGIA (CORE)
+# FUNZIONE STRATEGIA (CORE - SINCRONIZZATA)
 # ==============================================================================
 
 def run_full_strategy(params_dict, start_date, end_date):
@@ -190,7 +190,8 @@ def run_full_strategy(params_dict, start_date, end_date):
     if df.empty: return None, None, None, None, None, None
 
     df['Signal_CMI'] = np.where(df['CMI_ZScore'] > df['CMI_MA'], 1, 0)
-    df['Signal_CMI'] = df['Signal_CMI'].shift(1)
+    # [FIX] RIMOSSO SHIFT: Il segnale è valido per la chiusura di OGGI
+    # df['Signal_CMI'] = df['Signal_CMI'].shift(1) <-- RIMOSSO
     
     # VIX Ratio con gestione divisione per zero
     df['VIX_Ratio'] = df['VIX_Close'] / df['VIX3M_Close'].replace(0, np.nan)
@@ -210,57 +211,88 @@ def run_full_strategy(params_dict, start_date, end_date):
     df['Signal_VIX'] = signal_vix
     df['Signal_Count'] = df['Signal_CMI'].fillna(0) + df['Signal_VIX']
 
-    # --- 4. BACKTEST LOOP ---
+    # --- 4. BACKTEST LOOP (SINCRONIZZATO) ---
     initial_spy_price = df['SPY_Open'].iloc[0]
     spy_shares = CAPITALE_INIZIALE / initial_spy_price
-    cash_from_hedging, es_contracts, hedge_entry_price, current_tranches = 0.0, 0, 0, 0
+    cash_from_hedging = 0.0
+    es_contracts = 0
+    hedge_entry_price = 0.0
+    current_tranches = 0
+    
     portfolio_history = [{'Date': df.index[0], 'Portfolio_Value': CAPITALE_INIZIALE, 'MES_Contracts': 0}]
-    hedge_trades_count, hedge_stopped_out, stop_loss_events = 0, False, 0
+    hedge_trades_count = 0
+    hedge_stopped_out = False
+    stop_loss_events = 0
+    
     df['Hedge_PnL'] = 0.0
+    df['MES_Contracts'] = 0.0 # Per debug e bot
     df['Equity_at_Hedge_Entry'] = np.nan
 
-    for i in range(len(df) - 1):
-        target_tranches = df['Signal_Count'].iloc[i]
-        row_T1 = df.iloc[i+1]
-        realized_hedge_pnl_today, unrealized_pnl_change = 0, 0
+    # [FIX] Loop da 1 (per avere i-1) a len(df) (incluso l'ultimo giorno)
+    for i in range(1, len(df)):
+        current_date = df.index[i]
+        
+        # Prezzi Correnti e Precedenti
+        price_spy = df['SPY_Close'].iloc[i]
+        price_es_curr = df['ES_Close'].iloc[i]
+        price_es_prev = df['ES_Close'].iloc[i-1]
+        
+        # 1. Calcolo PnL della posizione tenuta da IERI a OGGI
+        realized_hedge_pnl_today = 0
         
         if current_tranches > 0:
-            unrealized_pnl_change = es_contracts * (row_T1['ES_Close'] - df.iloc[i]['ES_Close']) * params_dict['micro_es_multiplier']
-        
-        if current_tranches > 0:
-            if row_T1['ES_Open'] > hedge_entry_price * (1 + params_dict['stop_loss_threshold_hedge']):
-                realized_hedge_pnl_today = es_contracts * (row_T1['ES_Open'] - hedge_entry_price) * params_dict['micro_es_multiplier']
-                es_contracts, current_tranches, hedge_stopped_out = 0, 0, True
+            # Mark-to-Market PnL
+            daily_hedge_pnl = es_contracts * (price_es_curr - price_es_prev) * params_dict['micro_es_multiplier']
+            cash_from_hedging += daily_hedge_pnl
+            df.loc[current_date, 'Hedge_PnL'] = daily_hedge_pnl
+            
+            # 2. Check Stop Loss (sulla chiusura di OGGI)
+            if price_es_curr > hedge_entry_price * (1 + params_dict['stop_loss_threshold_hedge']):
+                # Stop Loss colpito! Chiudiamo tutto.
+                # Nota: In realtà saremmo usciti intraday, ma simuliamo uscita al Close per semplicità
+                current_tranches = 0
+                es_contracts = 0
+                hedge_stopped_out = True
                 stop_loss_events += 1
+                
+        # 3. Gestione Segnale (per la posizione da tenere per DOMANI)
+        # Se siamo stati stoppati oggi, rimaniamo flat fino a nuovo segnale (o rientro)
+        target_tranches = df['Signal_Count'].iloc[i]
+        
+        if target_tranches == 0:
+            hedge_stopped_out = False # Reset flag se il segnale si spegne naturalmente
+
+        if not hedge_stopped_out:
+            if target_tranches > current_tranches:
+                # AUMENTO ESPOSIZIONE
+                tranches_to_add = target_tranches - current_tranches
+                
+                # Calcolo nozionale su valore attuale
+                portfolio_value_now = (spy_shares * price_spy) + cash_from_hedging
+                notional_per_tranche = portfolio_value_now * params_dict['hedge_percentage_per_tranche']
+                
+                # Calcolo contratti (Short = negativo)
+                contracts_to_add = - (notional_per_tranche / (price_es_curr * params_dict['micro_es_multiplier'])) * tranches_to_add
+                
+                if current_tranches == 0:
+                    hedge_entry_price = price_es_curr # Entrata al prezzo di chiusura corrente
+                    hedge_trades_count += 1
+                    df.loc[current_date, 'Equity_at_Hedge_Entry'] = portfolio_value_now
+                
+                es_contracts += contracts_to_add
+                current_tranches = target_tranches
+                
             elif target_tranches < current_tranches:
-                contracts_per_tranche = es_contracts / current_tranches
-                contracts_to_close = contracts_per_tranche * (current_tranches - target_tranches)
-                realized_hedge_pnl_today = contracts_to_close * (row_T1['ES_Open'] - hedge_entry_price) * params_dict['micro_es_multiplier']
-                es_contracts -= contracts_to_close
+                # RIDUZIONE ESPOSIZIONE
+                # Riduciamo i contratti in proporzione
+                ratio = target_tranches / current_tranches
+                es_contracts = es_contracts * ratio
                 current_tranches = target_tranches
 
-        if target_tranches == 0: hedge_stopped_out = False
-        if target_tranches > current_tranches and not hedge_stopped_out:
-            tranches_to_add = target_tranches - current_tranches
-            portfolio_value_at_entry = (spy_shares * row_T1['SPY_Open']) + cash_from_hedging
-            notional_per_tranche = portfolio_value_at_entry * params_dict['hedge_percentage_per_tranche']
-            if current_tranches == 0:
-                hedge_entry_price = row_T1['ES_Open']
-                hedge_trades_count += 1
-                df.loc[row_T1.name, 'Equity_at_Hedge_Entry'] = portfolio_value_at_entry
-            
-            contracts_to_add = - (notional_per_tranche / (row_T1['ES_Open'] * params_dict['micro_es_multiplier'])) * tranches_to_add
-            es_contracts += contracts_to_add
-            current_tranches = target_tranches
-
-        cash_from_hedging += realized_hedge_pnl_today
-        spy_position_value = spy_shares * row_T1['SPY_Close']
-        unrealized_hedge_pnl = es_contracts * (row_T1['ES_Close'] - hedge_entry_price) * params_dict['micro_es_multiplier'] if current_tranches > 0 else 0
-        portfolio_value = spy_position_value + cash_from_hedging + unrealized_hedge_pnl
-        
-        daily_hedge_pnl = realized_hedge_pnl_today + unrealized_pnl_change
-        portfolio_history.append({'Date': row_T1.name, 'Portfolio_Value': portfolio_value, 'MES_Contracts': es_contracts})
-        df.loc[row_T1.name, 'Hedge_PnL'] = daily_hedge_pnl
+        # Salvataggio stato portafoglio
+        portfolio_value = (spy_shares * price_spy) + cash_from_hedging
+        portfolio_history.append({'Date': current_date, 'Portfolio_Value': portfolio_value, 'MES_Contracts': es_contracts})
+        df.loc[current_date, 'MES_Contracts'] = es_contracts
 
     results_df_final = pd.DataFrame(portfolio_history).set_index('Date')
     results_df_final['Strategy_Returns'] = results_df_final['Portfolio_Value'].pct_change()
@@ -350,6 +382,19 @@ def plotly_trades_chart(df_results, title):
     fig.add_trace(go.Scatter(x=aumento_copertura.index, y=aumento_copertura['ES_Close'], mode='markers', name='Aumento Copertura', marker=dict(color='red', symbol='triangle-down', size=10)))
     fig.add_trace(go.Scatter(x=riduzione_copertura.index, y=riduzione_copertura['ES_Close'], mode='markers', name='Riduzione Copertura', marker=dict(color='lime', symbol='triangle-up', size=10)))
     
+    # [FIX] Visualizza posizione aperta (se l'ultima riga ha contratti attivi)
+    last_row = df_results.iloc[-1]
+    if last_row['MES_Contracts'] != 0:
+        fig.add_trace(go.Scatter(
+            x=[last_row.name], y=[last_row['ES_Close']], mode='markers',
+            name='Posizione APERTA', 
+            marker=dict(color='orange', symbol='star', size=15, line=dict(width=2, color='white'))
+        ))
+        fig.add_annotation(
+            x=last_row.name, y=last_row['ES_Close'],
+            text="In Posizione", showarrow=True, arrowhead=1, yshift=-20, font=dict(color="white")
+        )
+
     for _, row in trade_points.iterrows():
         fig.add_annotation(x=row.name, y=row['SPY_Close'], text=f"<b>{int(row['MES_Contracts'])}</b>", showarrow=False, yshift=15, font=dict(color="white", size=10), bgcolor="rgba(0,0,0,0.5)")
     
@@ -395,7 +440,9 @@ if __name__ == '__main__':
     start_date_input = st.sidebar.date_input("Data Inizio Backtest", value=pd.to_datetime('2007-01-01'), min_value=pd.to_datetime('2005-01-01'), max_value=datetime.date.today())
     capital_input = st.sidebar.number_input("Capitale Iniziale ($)", value=default_params['capitale_iniziale'], min_value=1000.0, step=1000.0, format="%.2f")
     hedge_perc_input = st.sidebar.slider("Hedge % per Tranche", min_value=0.1, max_value=2.0, value=default_params['hedge_percentage_per_tranche'], step=0.025, format="%.3f")
-    stop_loss_input = st.sidebar.slider("Stop Loss sulla Copertura (%)", min_value=0.01, max_value=0.20, value=default_params['stop_loss_threshold_hedge'], step=0.01, format="%.2f")
+    
+    # [FIX] Default Stop Loss aggiornato a 5% (0.05)
+    stop_loss_input = st.sidebar.slider("Stop Loss sulla Copertura (%)", min_value=0.01, max_value=0.20, value=0.05, step=0.01, format="%.2f")
     
     params_dict = default_params.copy()
     params_dict['capitale_iniziale'] = capital_input
@@ -420,7 +467,13 @@ if __name__ == '__main__':
                         col1, col2, col3 = st.columns(3)
                         col1.metric("Segnale CMI", int(latest_signal_row['Signal_CMI']))
                         col2.metric("Segnale VIX Ratio", int(latest_signal_row['Signal_VIX']))
-                        col3.metric("Tranche di Copertura", int(latest_signal_row['Signal_Count']))
+                        
+                        # [FIX] Visualizza anche lo stato reale (Active vs Stoppato)
+                        contracts = latest_signal_row['MES_Contracts']
+                        active = contracts != 0
+                        delta_msg = f"{contracts:.1f} Contratti" if active else "Flat"
+                        col3.metric("Tranche (Target)", int(latest_signal_row['Signal_Count']), delta=delta_msg)
+                        
                         st.markdown("---")
                         st.subheader("Grafici Indicatori (ultimo anno)")
                         vix_plot_df = pd.DataFrame({'VIX_Ratio': df_last_year['VIX_Ratio'], 'Soglia Superiore': params_dict['vix_ratio_upper_threshold'], 'Soglia Inferiore': params_dict['vix_ratio_lower_threshold']})
