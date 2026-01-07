@@ -51,4 +51,5 @@ jobs:
       - name: 5. Run the signal generation script
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python bot_runner.py # o il nome del tuo script runner
+          EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }} # <--- AGGIUNTO QUESTO
+        run: python bot_runner.py
