@@ -1,5 +1,5 @@
 # app/dashboard.py
-# VERSIONE FINALE SINCRONIZZATA: Logic-Consistent (Signal-on-Close) + Stop Loss 5% + Plotting Fix
+# VERSIONE CORRETTA (Fix ValueError overlap)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -16,19 +16,15 @@ from io import StringIO
 # CONFIGURAZIONE EODHD / YAHOO
 # ==============================================================================
 
-# Mapping: Ticker Yahoo (usati nel config) -> Ticker EODHD
 TICKER_MAPPING_EODHD = {
     'SPY': 'SPY.US',
-    'ES=F': 'ES.CME',      # Controlla se hai accesso ai dati CME
+    'ES=F': 'ES.CME',
     '^VIX': 'VIX.INDX',
     '^VIX3M': 'VIX3M.INDX'
 }
 
 def fetch_hybrid_data(ticker_yahoo, api_key, start_date, end_date):
-    """
-    Tenta il download da EODHD. Se fallisce o manca la licenza,
-    fa fallback automatico su Yahoo Finance.
-    """
+    """Fallback ibrido EODHD -> Yahoo Finance."""
     eodhd_symbol = TICKER_MAPPING_EODHD.get(ticker_yahoo, ticker_yahoo)
     data_eodhd = pd.DataFrame()
     source_used = "N/A"
@@ -48,35 +44,31 @@ def fetch_hybrid_data(ticker_yahoo, api_key, start_date, end_date):
                 json_data = r.json()
                 if json_data and isinstance(json_data, list) and len(json_data) > 0:
                     df = pd.DataFrame(json_data)
-                    # Normalizzazione colonne
                     df = df.rename(columns={'date': 'Date', 'open': 'Open', 'high': 'High', 
                                           'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
                     df['Date'] = pd.to_datetime(df['Date'])
                     df.set_index('Date', inplace=True)
                     
-                    # Selezione e conversione
                     if not df.empty:
                         cols = ['Open', 'High', 'Low', 'Close', 'Volume']
                         for c in cols:
                             if c in df.columns: 
                                 df[c] = pd.to_numeric(df[c], errors='coerce')
-                        
                         data_eodhd = df[cols]
                         source_used = "EODHD"
         except Exception:
-            pass # Fallback silenzioso
+            pass 
 
     # 2. TENTATIVO YAHOO (FALLBACK)
     if data_eodhd.empty:
         try:
             df_yf = yf.download(ticker_yahoo, start=start_date, end=end_date, progress=False, auto_adjust=False)
             if not df_yf.empty:
-                # Gestione MultiIndex di yfinance
                 if isinstance(df_yf.columns, pd.MultiIndex):
                      try:
                         df_yf = df_yf.xs(ticker_yahoo, axis=1, level=1, drop_level=True)
                      except KeyError:
-                        pass # Potrebbe non essere necessario se il ticker è uno solo
+                        pass
                 
                 data_eodhd = df_yf[['Open', 'High', 'Low', 'Close', 'Volume']]
                 source_used = "Yahoo (Fallback)"
@@ -86,7 +78,7 @@ def fetch_hybrid_data(ticker_yahoo, api_key, start_date, end_date):
     return data_eodhd, source_used
 
 # ==============================================================================
-# FUNZIONE STRATEGIA (CORE - SINCRONIZZATA)
+# FUNZIONE STRATEGIA (CORE)
 # ==============================================================================
 
 def run_full_strategy(params_dict, start_date, end_date):
@@ -105,8 +97,6 @@ def run_full_strategy(params_dict, start_date, end_date):
 
     # --- 1. DOWNLOAD DATI MERCATO ---
     market_data_dfs = {}
-    
-    # Barra di progresso (solo se in Streamlit context)
     try:
         my_bar = st.progress(0, text="Download dati in corso...")
     except:
@@ -154,7 +144,7 @@ def run_full_strategy(params_dict, start_date, end_date):
                     temp_df['value'] = pd.to_numeric(temp_df['value'], errors='coerce')
                     cmi_data_dict[name] = temp_df['value']
     except Exception:
-        pass # FRED è opzionale o gestito dopo
+        pass
         
     cmi_data = pd.concat(cmi_data_dict.values(), axis=1) if cmi_data_dict else pd.DataFrame()
     if not cmi_data.empty:
@@ -166,7 +156,6 @@ def run_full_strategy(params_dict, start_date, end_date):
     # Verifica colonne essenziali
     colonne_essenziali = ['SPY_Open', 'SPY_Close', 'ES_Open', 'ES_Close', 'VIX_Close', 'VIX3M_Close']
     if not all(col in df.columns for col in colonne_essenziali):
-        # Fallback critico: prova a usare SPY per ES se ES manca (approssimazione)
         if 'ES_Close' not in df.columns and 'SPY_Close' in df.columns:
             df['ES_Close'] = df['SPY_Close']
             df['ES_Open'] = df['SPY_Open']
@@ -190,10 +179,7 @@ def run_full_strategy(params_dict, start_date, end_date):
     if df.empty: return None, None, None, None, None, None
 
     df['Signal_CMI'] = np.where(df['CMI_ZScore'] > df['CMI_MA'], 1, 0)
-    # [FIX] RIMOSSO SHIFT: Il segnale è valido per la chiusura di OGGI
-    # df['Signal_CMI'] = df['Signal_CMI'].shift(1) <-- RIMOSSO
     
-    # VIX Ratio con gestione divisione per zero
     df['VIX_Ratio'] = df['VIX_Close'] / df['VIX3M_Close'].replace(0, np.nan)
     
     signal_vix = [0] * len(df)
@@ -225,49 +211,39 @@ def run_full_strategy(params_dict, start_date, end_date):
     stop_loss_events = 0
     
     df['Hedge_PnL'] = 0.0
-    df['MES_Contracts'] = 0.0 # Per debug e bot
+    df['MES_Contracts'] = 0.0 
     df['Equity_at_Hedge_Entry'] = np.nan
 
-    # [FIX] Loop da 1 (per avere i-1) a len(df) (incluso l'ultimo giorno)
     for i in range(1, len(df)):
         current_date = df.index[i]
         
-        # Prezzi Correnti e Precedenti
         price_spy = df['SPY_Close'].iloc[i]
         price_es_curr = df['ES_Close'].iloc[i]
         price_es_prev = df['ES_Close'].iloc[i-1]
         
         # 1. Calcolo PnL della posizione tenuta da IERI a OGGI
-        realized_hedge_pnl_today = 0
-        
         if current_tranches > 0:
-            # Mark-to-Market PnL
             daily_hedge_pnl = es_contracts * (price_es_curr - price_es_prev) * params_dict['micro_es_multiplier']
             cash_from_hedging += daily_hedge_pnl
             df.loc[current_date, 'Hedge_PnL'] = daily_hedge_pnl
             
             # 2. Check Stop Loss (sulla chiusura di OGGI)
             if price_es_curr > hedge_entry_price * (1 + params_dict['stop_loss_threshold_hedge']):
-                # Stop Loss colpito! Chiudiamo tutto.
-                # Nota: In realtà saremmo usciti intraday, ma simuliamo uscita al Close per semplicità
                 current_tranches = 0
                 es_contracts = 0
                 hedge_stopped_out = True
                 stop_loss_events += 1
                 
-        # 3. Gestione Segnale (per la posizione da tenere per DOMANI)
-        # Se siamo stati stoppati oggi, rimaniamo flat fino a nuovo segnale (o rientro)
+        # 3. Gestione Segnale
         target_tranches = df['Signal_Count'].iloc[i]
         
         if target_tranches == 0:
-            hedge_stopped_out = False # Reset flag se il segnale si spegne naturalmente
+            hedge_stopped_out = False 
 
         if not hedge_stopped_out:
             if target_tranches > current_tranches:
                 # AUMENTO ESPOSIZIONE
                 tranches_to_add = target_tranches - current_tranches
-                
-                # Calcolo nozionale su valore attuale
                 portfolio_value_now = (spy_shares * price_spy) + cash_from_hedging
                 notional_per_tranche = portfolio_value_now * params_dict['hedge_percentage_per_tranche']
                 
@@ -275,7 +251,7 @@ def run_full_strategy(params_dict, start_date, end_date):
                 contracts_to_add = - (notional_per_tranche / (price_es_curr * params_dict['micro_es_multiplier'])) * tranches_to_add
                 
                 if current_tranches == 0:
-                    hedge_entry_price = price_es_curr # Entrata al prezzo di chiusura corrente
+                    hedge_entry_price = price_es_curr 
                     hedge_trades_count += 1
                     df.loc[current_date, 'Equity_at_Hedge_Entry'] = portfolio_value_now
                 
@@ -284,14 +260,14 @@ def run_full_strategy(params_dict, start_date, end_date):
                 
             elif target_tranches < current_tranches:
                 # RIDUZIONE ESPOSIZIONE
-                # Riduciamo i contratti in proporzione
                 ratio = target_tranches / current_tranches
                 es_contracts = es_contracts * ratio
                 current_tranches = target_tranches
 
-        # Salvataggio stato portafoglio
         portfolio_value = (spy_shares * price_spy) + cash_from_hedging
         portfolio_history.append({'Date': current_date, 'Portfolio_Value': portfolio_value, 'MES_Contracts': es_contracts})
+        
+        # AGGIORNAMENTO DATAFRAME PRINCIPALE
         df.loc[current_date, 'MES_Contracts'] = es_contracts
 
     results_df_final = pd.DataFrame(portfolio_history).set_index('Date')
@@ -302,7 +278,10 @@ def run_full_strategy(params_dict, start_date, end_date):
     cumulative_benchmark.iloc[0] = CAPITALE_INIZIALE
     
     equity_curves = pd.DataFrame({'Strategy_Equity': results_df_final['Portfolio_Value'], 'Buy_And_Hold_Equity': cumulative_benchmark}).dropna()
-    df_con_risultati = df.join(results_df_final[['MES_Contracts']]).ffill()
+    
+    # [FIX] Uniamo solo Portfolio_Value (MES_Contracts è già stato inserito nel loop)
+    # Evita il ValueError: columns overlap
+    df_con_risultati = df.join(results_df_final[['Portfolio_Value']]).ffill()
 
     return equity_curves, results_df_final['Strategy_Returns'].dropna(), benchmark_returns.dropna(), hedge_trades_count, stop_loss_events, df_con_risultati
 
@@ -382,7 +361,7 @@ def plotly_trades_chart(df_results, title):
     fig.add_trace(go.Scatter(x=aumento_copertura.index, y=aumento_copertura['ES_Close'], mode='markers', name='Aumento Copertura', marker=dict(color='red', symbol='triangle-down', size=10)))
     fig.add_trace(go.Scatter(x=riduzione_copertura.index, y=riduzione_copertura['ES_Close'], mode='markers', name='Riduzione Copertura', marker=dict(color='lime', symbol='triangle-up', size=10)))
     
-    # [FIX] Visualizza posizione aperta (se l'ultima riga ha contratti attivi)
+    # Marker Posizione Aperta Oggi
     last_row = df_results.iloc[-1]
     if last_row['MES_Contracts'] != 0:
         fig.add_trace(go.Scatter(
@@ -441,7 +420,6 @@ if __name__ == '__main__':
     capital_input = st.sidebar.number_input("Capitale Iniziale ($)", value=default_params['capitale_iniziale'], min_value=1000.0, step=1000.0, format="%.2f")
     hedge_perc_input = st.sidebar.slider("Hedge % per Tranche", min_value=0.1, max_value=2.0, value=default_params['hedge_percentage_per_tranche'], step=0.025, format="%.3f")
     
-    # [FIX] Default Stop Loss aggiornato a 5% (0.05)
     stop_loss_input = st.sidebar.slider("Stop Loss sulla Copertura (%)", min_value=0.01, max_value=0.20, value=0.05, step=0.01, format="%.2f")
     
     params_dict = default_params.copy()
@@ -468,7 +446,6 @@ if __name__ == '__main__':
                         col1.metric("Segnale CMI", int(latest_signal_row['Signal_CMI']))
                         col2.metric("Segnale VIX Ratio", int(latest_signal_row['Signal_VIX']))
                         
-                        # [FIX] Visualizza anche lo stato reale (Active vs Stoppato)
                         contracts = latest_signal_row['MES_Contracts']
                         active = contracts != 0
                         delta_msg = f"{contracts:.1f} Contratti" if active else "Flat"
