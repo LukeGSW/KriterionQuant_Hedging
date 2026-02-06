@@ -10,3 +10,4 @@ configparser
 plotly
 requests
 streamlit
+altair<5
